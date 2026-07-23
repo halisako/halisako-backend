@@ -1,0 +1,17 @@
+.venv
+.venv-clean
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+README.md
+*.log
+tests/
+pytest.ini
+requirements-dev.txt
