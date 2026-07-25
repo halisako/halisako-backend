@@ -202,13 +202,22 @@ def map_combat_events(analysis: GameAnalysis) -> list[CombatEvent]:
         event_type, intensity, description = _classify_move(analysis.moves, i)
         events.append(
             CombatEvent(
-                event_type=event_type,
-                intensity=intensity,
-                attacker=move.color,
-                description=description,
-                move_number=move.move_number,
-                move_label=move.move_label,
-            )
+        event_type=event_type,
+        intensity=intensity,
+        attacker=move.color,
+        description=description,
+        move_number=move.move_number,
+        move_label=move.move_label,
+
+        piece_moved=move.piece_moved,
+        from_square=move.from_square,
+        to_square=move.to_square,
+        captured_piece=move.captured_piece,
+        is_capture=move.is_capture,
+        is_check=move.is_check,
+        is_checkmate=move.is_checkmate,
+        is_castle=move.is_castle,
+    )
         )
     return events
 

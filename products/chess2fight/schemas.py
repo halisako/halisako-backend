@@ -12,6 +12,7 @@ from __future__ import annotations
 from enum import Enum
 
 from pydantic import BaseModel, Field
+from products.cinema.schemas import CinematicSequence
 
 
 # --- Request -----------------------------------------------------------
@@ -284,9 +285,13 @@ class GenerateResponse(BaseModel):
     game_analysis: GameAnalysis
     fight_story: FightStory
     video_placeholder: VideoPlaceholder
-    # --- new in this revision, purely additive top-level fields ---
+
+    # Intelligence layers
     game_metadata: GameMetadata
     combat_intelligence: CombatIntelligence
     battle_intelligence: BattleIntelligence
     style_profile: StyleProfile
     battle_mode_intelligence: BattleModeIntelligence
+
+    # Halisako Cinematic Engine output
+    cinematic_sequence: CinematicSequence

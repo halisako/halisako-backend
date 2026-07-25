@@ -37,6 +37,7 @@ from products.chess2fight.narrative_generator import NarrativeGenerator
 from products.chess2fight.pgn_analyzer import analyze_game
 from products.chess2fight.schemas import BattlePreferences, GenerateResponse, VideoPlaceholder
 from products.chess2fight.style_engine import generate_style_profile
+from products.cinema.cinematic_engine import CinematicEngine
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class FightOrchestrator:
 
     def __init__(self, ai_provider: AIProvider):
         self._narrative_generator = NarrativeGenerator(ai_provider)
+        self._cinematic_engine = CinematicEngine()
 
     async def generate_fight(self, pgn: str, preferences: BattlePreferences) -> GenerateResponse:
         analysis = analyze_game(pgn)  # raises InvalidPGNError — let the API layer map it to 400
@@ -65,9 +67,11 @@ class FightOrchestrator:
         combat_intelligence = generate_combat_intelligence(analysis)
         battle_intelligence = generate_battle_intelligence(analysis, combat_intelligence)
         style_profile = generate_style_profile(battle_intelligence, combat_intelligence, preferences.style)
+        cinematic_sequence = self._cinematic_engine.generate(combat_intelligence,style_profile,)
         battle_mode_intelligence = generate_battle_mode_intelligence(
             preferences.battle_mode, combat_intelligence, battle_intelligence
         )
+        
         logger.info(
             "Mapped %d combat events (pace=%s, balance=%s); battle_arc=%s, combat_style=%s; "
             "style=%s; battle_mode=%s (scale=%s)",
@@ -101,6 +105,7 @@ class FightOrchestrator:
             battle_intelligence=battle_intelligence,
             style_profile=style_profile,
             battle_mode_intelligence=battle_mode_intelligence,
+            cinematic_sequence=cinematic_sequence,
         )
 
 
