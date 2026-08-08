@@ -3,6 +3,7 @@ so route handlers can catch them precisely and map them to the right
 HTTP status code (see api/chess2fight.py)."""
 
 
+
 class Chess2FightError(Exception):
     """Base class for all Chess2Fight domain errors."""
 
@@ -19,3 +20,10 @@ class AIProviderError(Chess2FightError):
     letting it bubble up — a flaky AI provider shouldn't take down the
     whole endpoint when a perfectly good deterministic fallback exists.
     """
+
+class ImageProviderError(Chess2FightError):
+    """Raised when a requested image provider is not registered, or a
+    registered provider fails to generate an image."""
+
+class VideoBuilderError(Chess2FightError):
+    """Raised when FFmpeg cannot build the fight video."""

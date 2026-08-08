@@ -29,9 +29,11 @@ class Settings(BaseSettings):
     # once credentials are configured.
     ai_provider: str = "template"  # "template" | "openai" | "anthropic" | "gemini" | "local"
 
+
     # OpenAI — verify current model names at platform.openai.com/docs/models
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
+    openai_image_model: str = "dall-e-3"
 
     # Anthropic — verify current model names at docs.claude.com
     anthropic_api_key: str | None = None
@@ -53,11 +55,26 @@ class Settings(BaseSettings):
     # Generic timeout for any outbound AI provider call, in seconds.
     ai_request_timeout: float = 20.0
 
+        # --- Image generation ---
+    # "mock" is the safe default for local development and testing.
+    # Switch to a real provider once credentials are configured.
+    image_provider: str = "mock"
+    image_output_dir: str = "generated_images"
+
+    # --- Render storage ---
+    render_storage_root: str = "storage"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+settings = get_settings()
+
+render_storage_root: str = "storage"

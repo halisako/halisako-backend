@@ -37,6 +37,22 @@ def test_generate_chesscom_style_pgn_full_response_shape():
     assert res.status_code == 200
     data = res.json()
 
+    assert set(data.keys()) == {
+    "status",
+    "game_analysis",
+    "fight_story",
+    "video_placeholder",
+    "game_metadata",
+    "combat_intelligence",
+    "battle_intelligence",
+    "style_profile",
+    "battle_mode_intelligence",
+    "shot_timeline",
+    "cinematic_sequence",
+    "scene_composition",
+    "prompted_timeline",
+    }
+
     # --- existing contract, unchanged ---
     assert data["status"] == "completed"
     assert set(data["game_analysis"].keys()) >= {
@@ -82,6 +98,84 @@ def test_generate_chesscom_style_pgn_full_response_shape():
     assert isinstance(sp["visual_effects"], list) and sp["visual_effects"]
     assert sp["environment"]
     assert sp["finisher"]
+    # --- v3.0: shot_timeline, additive ---
+    assert "shot_timeline" in data
+
+    timeline = data["shot_timeline"]
+
+    assert timeline["shot_count"] > 0
+    assert timeline["total_duration_seconds"] > 0
+    assert len(timeline["shots"]) == timeline["shot_count"]
+
+    first_shot = timeline["shots"][0]
+
+    assert "sequence_order" in first_shot
+    assert "shot_type" in first_shot
+    assert "camera_angle" in first_shot
+    assert "camera_motion" in first_shot
+    assert "focus" in first_shot
+    assert "duration_seconds" in first_shot
+
+
+    # --- Sprint 3 Prompt 2: scene composition ---
+    assert "scene_composition" in data
+
+    scene = data["scene_composition"]
+
+
+    assert "scene_continuity" in scene
+
+    continuity = scene["scene_continuity"]
+
+    assert set(continuity.keys()) == {
+        "white_fighter",
+        "black_fighter",
+        "arena",
+        "lighting_continuity",
+        "cinematic_art_style",
+        "color_palette",
+}
+    white = continuity["white_fighter"]
+
+    assert set(white.keys()) == {
+        "hair",
+        "facial_features",
+        "clothing",
+        "armor",
+        "weapon",
+    }
+
+    black = continuity["black_fighter"]
+
+    assert set(black.keys()) == {
+        "hair",
+        "facial_features",
+        "clothing",
+        "armor",
+        "weapon",
+    }
+
+    arena = continuity["arena"]
+
+    assert set(arena.keys()) == {
+        "layout",
+        "weather",
+        "time_of_day",
+}
+
+
+    first = scene["shots"][0]
+
+    assert "scene" in first
+
+    assert first["scene"] == continuity
+
+    continuity = data["scene_composition"]["scene_continuity"]
+
+    for shot in data["scene_composition"]["shots"]:
+        assert shot["scene"] == continuity
+
+    assert len(scene["shots"]) == data["shot_timeline"]["shot_count"]
 
 
 def test_generate_lichess_style_pgn():
@@ -187,6 +281,8 @@ def test_existing_fields_identical_after_style_engine_addition():
     assert data["battle_intelligence"]["battle_arc"] == "blitz_execution"
 
     assert "style_profile" in data
+    assert "shot_timeline" in data
+    
 
 
 def test_generate_respects_requested_style_field():

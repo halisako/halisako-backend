@@ -13,6 +13,12 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 from products.cinema.schemas import CinematicSequence
+from products.cinema.schemas import CinematicSequence
+from products.chess2fight.cinematic.schemas import (
+    ComposedTimeline,
+    PromptedTimeline,
+    ShotTimeline,
+)
 
 
 # --- Request -----------------------------------------------------------
@@ -292,6 +298,9 @@ class GenerateResponse(BaseModel):
     battle_intelligence: BattleIntelligence
     style_profile: StyleProfile
     battle_mode_intelligence: BattleModeIntelligence
+    shot_timeline: ShotTimeline
 
     # Halisako Cinematic Engine output
     cinematic_sequence: CinematicSequence
+    scene_composition: ComposedTimeline
+    prompted_timeline: PromptedTimeline

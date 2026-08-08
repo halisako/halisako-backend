@@ -15,14 +15,10 @@ object or the legacy top-level `style` field, so this class only ever
 deals with one already-resolved preferences object regardless of which
 request shape the client used.
 
-    PGN -> Metadata Normalizer -> Analysis -> Combat Mapper ->
-    Battle Director -> Style Engine -> Battle Mode Interpreter ->
-    Narrative Generator
-
-Style Engine and the Battle Mode Interpreter both run off Combat
-Intelligence + Battle Intelligence independently of each other (neither
-imports the other) — see battle_mode_engine.py's module docstring for
-why that independence is the point, not an oversight."""
+  The Timeline Engine and Scene Composer both run last, not from within
+Battle Director itself, because the Timeline Engine needs
+BattleIntelligence and FightStory — and FightStory doesn't exist until
+the Narrative Generator has already run."""
 
 from __future__ import annotations
 
@@ -30,14 +26,17 @@ import logging
 import re
 
 from core.ai_router import AIProvider
+from products.chess2fight.cinematic.prompt_generator import generate_prompts
 from products.chess2fight.battle_director import generate_battle_intelligence
 from products.chess2fight.battle_mode_engine import generate_battle_mode_intelligence
+from products.chess2fight.cinematic.timeline_engine import generate_shot_timeline
 from products.chess2fight.combat_mapper import generate_combat_intelligence
 from products.chess2fight.narrative_generator import NarrativeGenerator
 from products.chess2fight.pgn_analyzer import analyze_game
 from products.chess2fight.schemas import BattlePreferences, GenerateResponse, VideoPlaceholder
 from products.chess2fight.style_engine import generate_style_profile
 from products.cinema.cinematic_engine import CinematicEngine
+from products.chess2fight.cinematic.scene_composer import compose_scene
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +84,32 @@ class FightOrchestrator:
             battle_mode_intelligence.scale,
         )
 
+
         fight_story = await self._narrative_generator.generate(
             analysis, combat_intelligence, battle_intelligence, style_profile, battle_mode_intelligence
+        )
+        
+        shot_timeline = generate_shot_timeline(battle_intelligence, fight_story)
+        logger.info(
+            "Built shot timeline: %d shots, %.1fs total.",
+            shot_timeline.shot_count, shot_timeline.total_duration_seconds,
+        )     
+        scene_composition = compose_scene(
+            shot_timeline,
+            battle_intelligence,
+            style_profile,
+            battle_mode_intelligence,
+        )   
+        logger.info(
+        "Composed scene continuity: art_style=%s, palette=%s.",
+        scene_composition.scene_continuity.cinematic_art_style,
+        scene_composition.scene_continuity.color_palette,
+        )
+        prompted_timeline = generate_prompts(scene_composition)
+
+        logger.info(
+            "Generated %d image prompts.",
+            prompted_timeline.shot_count,
         )
 
         video_placeholder = VideoPlaceholder(
@@ -105,7 +128,10 @@ class FightOrchestrator:
             battle_intelligence=battle_intelligence,
             style_profile=style_profile,
             battle_mode_intelligence=battle_mode_intelligence,
+            shot_timeline=shot_timeline,
             cinematic_sequence=cinematic_sequence,
+            scene_composition=scene_composition,
+            prompted_timeline=prompted_timeline,
         )
 
 
