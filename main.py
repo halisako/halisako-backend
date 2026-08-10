@@ -1,8 +1,15 @@
 """FastAPI application entry point. Run with:
-    uvicorn main:app --host 0.0.0.0 --port 8000
-(or see Dockerfile / README for the Render-ready command)."""
+uvicorn main:app --host 0.0.0.0 --port 8000
+(or see Dockerfile / README for the Render-ready command).
+"""
 
 from __future__ import annotations
+
+import asyncio
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import logging
 
