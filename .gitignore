@@ -12,3 +12,5 @@ __pycache__/
 .DS_Store
 
 storage/
+
+generated_images/
