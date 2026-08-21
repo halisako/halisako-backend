@@ -24,7 +24,7 @@ REAL_WORKFLOW_PATH = "products/chess2fight/rendering/workflows/flux2_klein_t2i_4
 
 
 def _load_real_workflow() -> dict:
-    with open(REAL_WORKFLOW_PATH) as f:
+    with open(REAL_WORKFLOW_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 

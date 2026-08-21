@@ -275,6 +275,13 @@ class ComfyUIImageProvider(ImageProvider):
                 "flux2_klein_t2i_4b.json (Sprint 4 Prompt 6) to already be in the repository — "
                 "has settings.comfyui_image_workflow_path been changed?"
             )
+        # Explicit encoding, not Path.read_text()'s platform default —
+        # general Windows portability, matching the same fix applied to
+        # core/animation_providers/comfyui.py (where it's load-bearing:
+        # that workflow's negative prompt is non-ASCII). This file's own
+        # prompt text is currently ASCII, but pins the same explicit
+        # behavior rather than relying on the platform default staying
+        # compatible. Sprint 4 Prompt 7.1.
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _inject_parameters(self, workflow: dict[str, Any], prompt: str, width: int, height: int) -> dict[str, Any]:

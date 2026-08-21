@@ -39,7 +39,7 @@ SCHOLARS_MATE_PGN = (
 
 
 def _sample_pgn() -> str:
-    return SAMPLE_PGN_PATH.read_text()
+    return SAMPLE_PGN_PATH.read_text(encoding="utf-8")
 
 
 def _runner(tmp_path, image_provider=None, animation_provider=None) -> SingleShotAcceptanceRunner:

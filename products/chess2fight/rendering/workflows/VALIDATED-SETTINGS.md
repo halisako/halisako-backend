@@ -115,6 +115,50 @@ game, renders its real `image_prompt` through the validated FLUX
 workflow, and animates the result through the validated Wan workflow —
 printing both the resulting image and video paths on success.
 
+### Low-cost GPU smoke test (Sprint 4 Prompt 7.1)
+
+Before spending GPU time on a shot's full real duration (shot 0's real
+duration is 7.75s → 185 Wan frames), first prove the FLUX → Wan handoff
+works with a capped, low-cost animation duration:
+
+```bash
+export IMAGE_PROVIDER=comfyui
+export ANIMATION_PROVIDER=comfyui
+export COMFYUI_BASE_URL=http://127.0.0.1:8188
+
+python scripts/render_single_shot.py \
+    --sample \
+    --shot-index 0 \
+    --max-animation-seconds 2
+```
+
+This uses the real shot's real `image_prompt` (unmodified), generates
+a real FLUX keyframe, and animates it for a capped ~2.0s (49 frames at
+24fps — the exact frame count already proven on the RTX 4090) instead
+of the shot's full real duration. `--max-animation-seconds` never
+changes the shot's own real cinematic duration — only the duration
+used for the animation step in this one acceptance run.
+
+Once that succeeds, run the subsequent full-duration command (no cap):
+
+```bash
+python scripts/render_single_shot.py \
+    --sample \
+    --shot-index 0
+```
+
+This requests the shot's full real duration — approximately 7.75
+seconds, 185 frames at 24fps.
+
+### Windows portability note
+
+Workflow JSON loading in both `core/image_providers/comfyui.py` and
+`core/animation_providers/comfyui.py` uses explicit
+`Path.read_text(encoding="utf-8")` — required for
+`wan22_i2v_5b.json`, whose negative prompt (node 7) is non-ASCII
+Chinese text that Windows' default locale encoding (cp1252) cannot
+decode correctly.
+
 ### Live acceptance test (same path, as a gated pytest)
 
 ```bash

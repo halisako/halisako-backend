@@ -92,7 +92,7 @@ def test_real_shot_renders_and_animates_through_the_production_pipeline():
     externally-validated FLUX and Wan providers."""
     runner = SingleShotAcceptanceRunner(get_ai_provider())
     preferences = BattlePreferences(battle_mode=BattleMode.DUEL, style="anime")
-    pgn = SAMPLE_PGN_PATH.read_text()
+    pgn = SAMPLE_PGN_PATH.read_text(encoding="utf-8")
 
     plan = asyncio.run(runner.prepare(pgn, preferences, shot_index=0))
     print(f"\nSelected shot: {plan.shot.shot_type.value}, {plan.shot.duration_seconds:.2f}s")

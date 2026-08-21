@@ -38,6 +38,19 @@ inspect what *would* happen before any ComfyUI/network call is made:
 Never calls `VideoBuilder.concatenate_clips()` — there is exactly one
 clip, so there is nothing to concatenate; the single animated clip's
 own path *is* the result.
+
+Sprint 4 Prompt 7.1 added `max_animation_seconds` — an acceptance-only
+cap on the duration passed to the animation step, so a low-cost GPU
+smoke test (e.g. a real 49-frame Wan clip at 24fps/2s) can run before
+spending GPU time animating a shot's full real duration (which can run
+well past 100+ frames). The real `PromptedShot.duration_seconds` this
+cap is applied against is never mutated — `prepare()` computes a
+separate `effective_animation_duration_seconds` field, and `execute()`
+builds a non-mutating `model_copy()` of the shot (new object, original
+untouched) only when a cap actually changes the duration used; when no
+cap is given, the exact same timeline object used for rendering is
+reused for animation too, so that path is structurally — not just
+numerically — identical to this module's original Prompt 7 behavior.
 """
 
 from __future__ import annotations
@@ -67,6 +80,13 @@ class SingleShotPlan(BaseModel):
     real `PromptedShot`, not a summary of it), plus everything needed
     to actually execute this plan later without re-running
     orchestration.
+
+    `shot.duration_seconds` is always the real, unmodified cinematic
+    duration — Sprint 4 Prompt 7.1's acceptance-only animation cap
+    (`max_animation_seconds`) never touches it. `shot` is never
+    mutated to reflect a cap; `effective_animation_duration_seconds`
+    is the separate, explicit field that does, so the two are never
+    confusable in code that reads this plan.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -83,8 +103,21 @@ class SingleShotPlan(BaseModel):
     comfyui_base_url: str = Field(..., min_length=1, description="Configured ComfyUI server URL.")
     comfyui_image_workflow_path: str = Field(..., min_length=1)
     comfyui_animation_workflow_path: str = Field(..., min_length=1)
+    max_animation_seconds: float | None = Field(
+        default=None,
+        description="Acceptance-only animation duration cap requested via prepare(), if any. "
+        "None means no cap was requested — the full real shot duration is used, unchanged from "
+        "Sprint 4 Prompt 7's original behavior.",
+    )
+    effective_animation_duration_seconds: float = Field(
+        ...,
+        gt=0,
+        description="The duration actually used to build AnimationInstruction: "
+        "min(shot.duration_seconds, max_animation_seconds) if a cap was requested, "
+        "else exactly shot.duration_seconds, unchanged.",
+    )
     calculated_wan_frame_count: int = Field(
-        ..., ge=1, description="The Wan-valid (4n+1) frame count this shot's duration will produce."
+        ..., ge=1, description="The Wan-valid (4n+1) frame count for effective_animation_duration_seconds."
     )
     fps: int = Field(..., gt=0, description="FPS the frame count above was calculated against.")
 
@@ -132,6 +165,7 @@ class SingleShotAcceptanceRunner:
         preferences: BattlePreferences,
         shot_index: int = 0,
         fps: int | None = None,
+        max_animation_seconds: float | None = None,
     ) -> SingleShotPlan:
         """Runs the real orchestration/cinematic pipeline and selects
         one shot. Makes no ComfyUI or network calls — safe for
@@ -146,6 +180,17 @@ class SingleShotAcceptanceRunner:
                 timeline's shot list.
             fps: FPS to calculate the Wan frame count against.
                 Defaults to `settings.comfyui_default_fps`.
+            max_animation_seconds: Sprint 4 Prompt 7.1 — an
+                acceptance-only cap on the duration passed to the
+                animation step, for a low-cost GPU smoke test before
+                spending GPU time on a shot's full real duration. Must
+                be > 0 if given. Never changes `shot.duration_seconds`
+                itself (the real cinematic duration) — only
+                `effective_animation_duration_seconds` on the returned
+                plan. `None` (the default) means no cap: the full real
+                shot duration is used, and every returned field
+                behaves exactly as Sprint 4 Prompt 7's original
+                implementation did.
 
         Returns:
             A SingleShotPlan describing exactly what execute() would do.
@@ -153,9 +198,13 @@ class SingleShotAcceptanceRunner:
         Raises:
             ShotIndexOutOfRangeError: If `shot_index` isn't a valid
                 index into the timeline's actual shot list.
+            ValueError: If `max_animation_seconds` is given and isn't > 0.
             InvalidPGNError: If `pgn` itself doesn't parse — propagates
                 unchanged from FightOrchestrator/the PGN analyzer.
         """
+        if max_animation_seconds is not None and max_animation_seconds <= 0:
+            raise ValueError(f"max_animation_seconds must be > 0, got {max_animation_seconds!r}.")
+
         settings = get_settings()
 
         generate_response = await self._orchestrator.generate_fight(pgn, preferences)
@@ -171,9 +220,16 @@ class SingleShotAcceptanceRunner:
         selected_shot = shots[shot_index]
         resolved_fps = fps if fps is not None else settings.comfyui_default_fps
 
+        effective_animation_duration = (
+            min(selected_shot.duration_seconds, max_animation_seconds)
+            if max_animation_seconds is not None
+            else selected_shot.duration_seconds
+        )
+
         logger.info(
-            "Single-shot acceptance: selected shot %d/%d (%s, %.2fs).",
-            shot_index, len(shots), selected_shot.shot_type.value, selected_shot.duration_seconds,
+            "Single-shot acceptance: selected shot %d/%d (%s, real=%.2fs, effective=%.2fs).",
+            shot_index, len(shots), selected_shot.shot_type.value,
+            selected_shot.duration_seconds, effective_animation_duration,
         )
 
         return SingleShotPlan(
@@ -187,7 +243,9 @@ class SingleShotAcceptanceRunner:
             comfyui_base_url=settings.comfyui_base_url,
             comfyui_image_workflow_path=settings.comfyui_image_workflow_path,
             comfyui_animation_workflow_path=settings.comfyui_workflow_path,
-            calculated_wan_frame_count=_duration_to_frame_count(selected_shot.duration_seconds, resolved_fps),
+            max_animation_seconds=max_animation_seconds,
+            effective_animation_duration_seconds=effective_animation_duration,
+            calculated_wan_frame_count=_duration_to_frame_count(effective_animation_duration, resolved_fps),
             fps=resolved_fps,
         )
 
@@ -214,11 +272,28 @@ class SingleShotAcceptanceRunner:
             A SingleShotAcceptanceResult with the real local image and
             video paths.
         """
-        single_shot_timeline = self._build_single_shot_timeline(plan)
+        render_timeline = self._build_single_shot_timeline(plan, plan.shot)
+        render_output = await self._render_pipeline.render(render_timeline, plan.fight_id)
 
-        render_output = await self._render_pipeline.render(single_shot_timeline, plan.fight_id)
+        if plan.effective_animation_duration_seconds == plan.shot.duration_seconds:
+            # No cap requested (or the requested cap wasn't below the
+            # real duration) — reuse the exact same timeline object
+            # rather than constructing an equivalent copy, so this
+            # path is structurally identical to Sprint 4 Prompt 7's
+            # original behavior, not just numerically equivalent to it.
+            animation_timeline = render_timeline
+        else:
+            # plan.shot itself is never touched — model_copy returns a
+            # new, separate PromptedShot; the original real cinematic
+            # duration on plan.shot remains exactly what
+            # FightOrchestrator produced.
+            animation_shot = plan.shot.model_copy(
+                update={"duration_seconds": plan.effective_animation_duration_seconds}
+            )
+            animation_timeline = self._build_single_shot_timeline(plan, animation_shot)
+
         animation_output = await self._animation_pipeline.animate(
-            render_output, single_shot_timeline, width=width, height=height, fps=plan.fps,
+            render_output, animation_timeline, width=width, height=height, fps=plan.fps,
         )
 
         # Exactly one shot in, exactly one animated clip out — asserted,
@@ -237,15 +312,17 @@ class SingleShotAcceptanceRunner:
             video_duration_seconds=animated_shot.duration_seconds,
         )
 
-    def _build_single_shot_timeline(self, plan: SingleShotPlan) -> PromptedTimeline:
+    def _build_single_shot_timeline(self, plan: SingleShotPlan, shot: PromptedShot) -> PromptedTimeline:
         """Constructs a valid, minimal PromptedTimeline containing only
-        the planned shot. RenderPipeline.render() and
-        AnimationPipeline.animate() need no changes at all for this —
-        both already operate purely via `for shot in timeline.shots`,
-        with no assumption about a fixed shot count."""
+        `shot` (either `plan.shot` unmodified, or a duration-capped
+        copy of it — the caller decides which). RenderPipeline.render()
+        and AnimationPipeline.animate() need no changes at all for
+        this — both already operate purely via
+        `for shot in timeline.shots`, with no assumption about a fixed
+        shot count."""
         return PromptedTimeline(
-            shots=[plan.shot],
-            total_duration_seconds=plan.shot.duration_seconds,
+            shots=[shot],
+            total_duration_seconds=shot.duration_seconds,
             shot_count=1,
             scene_continuity=plan.scene_continuity,
         )

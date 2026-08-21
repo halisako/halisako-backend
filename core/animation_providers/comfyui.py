@@ -346,6 +346,10 @@ class ComfyUIAnimationProvider(AnimationProvider):
                 f"ComfyUI workflow file not found at {path!r}. Expected the validated "
                 "wan22_i2v_5b.json — see products/chess2fight/rendering/workflows/README.md."
             )
+        # Explicit encoding, not Path.read_text()'s platform default: this
+        # workflow's negative prompt (node 7) is non-ASCII Chinese text —
+        # Windows' default locale encoding (cp1252) cannot decode it and
+        # would raise or silently corrupt it. Sprint 4 Prompt 7.1.
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _inject_parameters(

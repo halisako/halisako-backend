@@ -70,6 +70,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=704, help="Output height. Default: 704 (validated FLUX default).")
     parser.add_argument("--fps", type=int, default=None, help="FPS for Wan frame-count calculation. Default: settings.comfyui_default_fps.")
     parser.add_argument(
+        "--max-animation-seconds", type=float, default=None,
+        help="Sprint 4 Prompt 7.1: acceptance-only cap on the animation duration, for a low-cost GPU "
+        "smoke test — e.g. --max-animation-seconds 2 produces a real 49-frame clip at 24fps instead of "
+        "the shot's full real duration. Never changes the real cinematic shot duration itself, only "
+        "the duration passed to the animation step. Default: no cap (full real shot duration is used).",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Run orchestration and shot selection only — print the plan, make no ComfyUI/network calls.",
     )
@@ -80,9 +87,9 @@ def _resolve_pgn(args: argparse.Namespace) -> str:
     if args.pgn:
         return args.pgn
     if args.pgn_file:
-        return Path(args.pgn_file).read_text()
+        return Path(args.pgn_file).read_text(encoding="utf-8")
     if args.sample:
-        return SAMPLE_PGN_PATH.read_text()
+        return SAMPLE_PGN_PATH.read_text(encoding="utf-8")
     print("ERROR: one of --pgn, --pgn-file, or --sample is required.", file=sys.stderr)
     sys.exit(1)
 
@@ -91,7 +98,11 @@ def _print_plan_summary(plan: SingleShotPlan) -> None:
     print("=== Single-shot acceptance plan ===")
     print(f"shot index:          {plan.shot_index} of {plan.total_shots_in_timeline}")
     print(f"shot type:           {plan.shot.shot_type.value}")
-    print(f"duration:            {plan.shot.duration_seconds:.2f}s")
+    print(f"original shot duration:       {plan.shot.duration_seconds:.2f}s")
+    if plan.max_animation_seconds is not None:
+        print(f"effective animation duration: {plan.effective_animation_duration_seconds:.2f}s (capped via --max-animation-seconds {plan.max_animation_seconds:.2f})")
+    else:
+        print(f"effective animation duration: {plan.effective_animation_duration_seconds:.2f}s (no cap requested — using the full real shot duration)")
     print(f"image prompt:        {plan.shot.image_prompt[:200]}{'...' if len(plan.shot.image_prompt) > 200 else ''}")
     print(f"image provider:      {plan.image_provider}")
     print(f"animation provider:  {plan.animation_provider}")
@@ -112,8 +123,14 @@ async def _main() -> int:
     preferences = BattlePreferences(battle_mode=BattleMode(args.battle_mode), style=args.style)
 
     try:
-        plan = await runner.prepare(pgn, preferences, shot_index=args.shot_index, fps=args.fps)
+        plan = await runner.prepare(
+            pgn, preferences, shot_index=args.shot_index, fps=args.fps,
+            max_animation_seconds=args.max_animation_seconds,
+        )
     except ShotIndexOutOfRangeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # PGN parsing, analysis, etc.
