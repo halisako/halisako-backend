@@ -197,11 +197,22 @@ class ImageProviderRegistry:
 
 def _default_registry() -> ImageProviderRegistry:
     """Builds the registry pre-populated with every provider this
-    backend ships. Adding a real provider later (a DALL-E or Stable
-    Diffusion implementation, say) means one `register()` call here —
-    never a change to `ImageRouter` itself."""
+    backend ships.
+
+    This function — not `ImageRouter` itself — is where knowledge of
+    concrete provider classes is allowed to live: a composition root
+    ("which providers exist"), not routing logic. `ComfyUIImageProvider`
+    is imported locally (not at module level), matching
+    `core/animation_router.py`'s own established pattern for
+    `ComfyUIAnimationProvider` — so `core/image_router.py` (imported by
+    every caller, including anything just using the mock) never has a
+    hard import-time dependency on `httpx`-based ComfyUI networking
+    code that most callers don't need."""
+    from core.image_providers.comfyui import ComfyUIImageProvider
+
     registry = ImageProviderRegistry()
     registry.register("mock", MockImageProvider)
+    registry.register("comfyui", ComfyUIImageProvider)
     return registry
 
 

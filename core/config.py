@@ -64,6 +64,47 @@ class Settings(BaseSettings):
     # --- Render storage ---
     render_storage_root: str = "storage"
 
+    # --- Animation generation ---
+    # "mock" is the safe default for local development and testing.
+    # Switch to a real provider once one is implemented (Sprint 4,
+    # later prompt) and credentials are configured.
+    animation_provider: str = "mock"
+    animation_output_dir: str = "generated_animations"
+
+    # --- ComfyUI / Wan 2.2 5B animation provider (Sprint 4 Prompt 3) ---
+    # "http://localhost:8188" is ComfyUI's own standard default when run
+    # locally — a reasonable development default, not a hardcoded
+    # production URL; a real deployment overrides this via environment
+    # variable. No credentials here: this environment has no ComfyUI
+    # installation to authenticate against (see this feature's
+    # engineering report), and the local ComfyUI API these calls target
+    # does not require one by default.
+    comfyui_base_url: str = "http://localhost:8188"
+    comfyui_timeout_seconds: float = 300.0
+    comfyui_workflow_path: str = "products/chess2fight/rendering/workflows/wan22_i2v_5b.json"
+    # Used only to convert AnimationInstruction.duration_seconds into a
+    # frame count when instruction.fps is unset. VERIFIED (Sprint 4
+    # Prompt 4): the supplied, experimentally-validated wan22_i2v_5b.json
+    # workflow's own node 57 (CreateVideo) has fps=24 — this is no
+    # longer a placeholder guess, it's read directly from that node.
+    comfyui_default_fps: int = 24
+
+    # --- ComfyUI / FLUX image provider (Sprint 4 Prompt 5) ---
+    # Reuses comfyui_base_url / comfyui_timeout_seconds above rather
+    # than duplicating them - the same ComfyUI server is expected to
+    # eventually serve both FLUX (images) and Wan (animation) on one
+    # GPU worker, per this task's own explicit instruction.
+    comfyui_image_workflow_path: str = "products/chess2fight/rendering/workflows/flux2_klein_t2i_4b.json"
+    # 1280x704 - exactly 2x the experimentally-validated Wan 2.2 5B
+    # resolution (640x352, from Prompt 4), so a FLUX keyframe needs no
+    # cropping or aspect-ratio distortion before Wan conditioning.
+    # Divisible by 16 (Wan's own confirmed alignment requirement) and
+    # independently cited elsewhere as a common Wan resolution - not
+    # just derived by doubling. Not verified against a live FLUX
+    # instance in this environment.
+    comfyui_image_default_width: int = 1280
+    comfyui_image_default_height: int = 704
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

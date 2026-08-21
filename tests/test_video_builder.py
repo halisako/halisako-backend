@@ -253,3 +253,121 @@ def test_frames_are_assembled_in_correct_numeric_order(tmp_path):
     assert red > 240
     assert green < 15
     assert blue < 15
+
+
+# --- concatenate_clips (Sprint 4 Prompt 2: assembling animated clips) -------
+
+
+async def _make_single_frame_clip(builder, tmp_path, name: str, color, duration=1.0, size=(320, 240)):
+    """Builds one tiny real clip via build_video, for use as
+    concatenate_clips input — mirrors how AnimationPipeline's
+    MockAnimationProvider actually produces its per-shot clips."""
+    frame_dir = tmp_path / f"{name}_frames"
+    frame_dir.mkdir()
+    Image.new("RGB", size, color=color).save(frame_dir / "frame0001.png")
+    result = await builder.build_video(
+        frame_directory=str(frame_dir), output_path=str(tmp_path / f"{name}.mp4"),
+        frame_count=1, width=size[0], height=size[1], frame_duration_seconds=duration,
+    )
+    return result.video_path
+
+
+def test_concatenate_clips_produces_a_real_valid_mp4(tmp_path):
+    builder = VideoBuilder()
+    clip1 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c1", (255, 0, 0)))
+    clip2 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c2", (0, 255, 0)))
+
+    result = asyncio.run(
+        builder.concatenate_clips(
+            clip_paths=[clip1, clip2], output_path=str(tmp_path / "final.mp4"),
+            total_duration_seconds=2.0, width=320, height=240,
+        )
+    )
+    assert (tmp_path / "final.mp4").exists()
+    probe = _probe(result.video_path)
+    video_stream = next(s for s in probe["streams"] if s["codec_type"] == "video")
+    assert video_stream["width"] == 320
+    assert video_stream["height"] == 240
+
+
+def test_concatenate_clips_preserves_total_duration(tmp_path):
+    builder = VideoBuilder()
+    clip1 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c1", (255, 0, 0), duration=1.5))
+    clip2 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c2", (0, 255, 0), duration=2.5))
+    clip3 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c3", (0, 0, 255), duration=1.0))
+
+    result = asyncio.run(
+        builder.concatenate_clips(
+            clip_paths=[clip1, clip2, clip3], output_path=str(tmp_path / "final.mp4"),
+            total_duration_seconds=5.0, width=320, height=240,
+        )
+    )
+    assert result.duration_seconds == 5.0
+    probe = _probe(result.video_path)
+    actual_duration = float(probe["format"]["duration"])
+    assert abs(actual_duration - 5.0) < 0.5
+
+
+def test_concatenate_clips_preserves_order_of_multiple_distinct_segments(tmp_path):
+    """The core acceptance property: three visually distinct clips,
+    concatenated, must appear in the final video in the same order —
+    not merged, not reordered, not just the first clip repeated."""
+    builder = VideoBuilder()
+    clip1 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c1", (255, 0, 0)))
+    clip2 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c2", (0, 255, 0)))
+    clip3 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c3", (0, 0, 255)))
+
+    result = asyncio.run(
+        builder.concatenate_clips(
+            clip_paths=[clip1, clip2, clip3], output_path=str(tmp_path / "final.mp4"),
+            total_duration_seconds=3.0, width=320, height=240,
+        )
+    )
+
+    extracted_dir = tmp_path / "extracted"
+    extracted_dir.mkdir()
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", result.video_path, "-vf", "fps=1", str(extracted_dir / "f%02d.png")],
+        capture_output=True, check=True,
+    )
+    frames = sorted(extracted_dir.iterdir())
+    assert len(frames) == 3
+
+    def _dominant(path):
+        r, g, b = Image.open(path).convert("RGB").getpixel((160, 120))
+        return max(((r, "red"), (g, "green"), (b, "blue")), key=lambda pair: pair[0])[1]
+
+    assert [_dominant(f) for f in frames] == ["red", "green", "blue"]
+
+
+def test_concatenate_clips_raises_on_empty_list():
+    builder = VideoBuilder()
+    with pytest.raises(VideoBuilderError, match="No clips"):
+        asyncio.run(
+            builder.concatenate_clips(clip_paths=[], output_path="/tmp/out.mp4", total_duration_seconds=1.0)
+        )
+
+
+def test_concatenate_clips_raises_on_missing_clip(tmp_path):
+    builder = VideoBuilder()
+    with pytest.raises(VideoBuilderError, match="not found"):
+        asyncio.run(
+            builder.concatenate_clips(
+                clip_paths=[str(tmp_path / "does_not_exist.mp4")],
+                output_path=str(tmp_path / "out.mp4"), total_duration_seconds=1.0,
+            )
+        )
+
+
+def test_concatenate_clips_cleans_up_its_temp_list_file(tmp_path):
+    builder = VideoBuilder()
+    clip1 = asyncio.run(_make_single_frame_clip(builder, tmp_path, "c1", (255, 0, 0)))
+
+    asyncio.run(
+        builder.concatenate_clips(
+            clip_paths=[clip1], output_path=str(tmp_path / "final.mp4"),
+            total_duration_seconds=1.0, width=320, height=240,
+        )
+    )
+    leftover = list(tmp_path.glob(".*_concat_list.txt"))
+    assert leftover == []

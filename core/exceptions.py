@@ -27,3 +27,11 @@ class ImageProviderError(Chess2FightError):
 
 class VideoBuilderError(Chess2FightError):
     """Raised when FFmpeg cannot build the fight video."""
+
+class AnimationProviderError(Chess2FightError):
+    """Raised for infrastructure-level animation failures — an
+    unregistered provider name, a misconfigured router. NOT used for
+    an individual generation attempt failing (a bad source image, an
+    encoding error): that's represented as data, via
+    AnimationResult(success=False, error_message=...), not an
+    exception — see core/animation_router.py."""

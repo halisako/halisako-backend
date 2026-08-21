@@ -1,25 +1,41 @@
-"""FightVideoPipeline: the complete Sprint 3 pipeline, end to end.
+"""FightVideoPipeline: the complete Sprint 3 + Sprint 4 pipeline, end to end.
 
     PGN -> Battle Director -> Battle Intelligence -> Fight Story ->
     Timeline Engine -> Scene Composer -> Prompt Generator ->
-    ImageRouter -> Render Pipeline -> Video Builder -> fight.mp4
+    ImageRouter -> Render Pipeline -> Animation Pipeline ->
+    AnimationRouter -> Video Builder (concatenation) -> fight.mp4
 
-This file isn't one the brief explicitly named — it only named
-`video_builder.py` — but "integrate the complete pipeline" needs this
-orchestration to live somewhere, and putting it here (rather than
-inline in the API route) keeps `api/chess2fight.py` thin, matching
-that module's own stated principle ("no chess logic or AI logic lives
-here"), and keeps `orchestrator.py` completely untouched — this module
-calls `FightOrchestrator.generate_fight()` as-is, adding nothing to
-it, so every existing Sprint 2 test is unaffected by this file's
-existence.
+This file isn't one any brief explicitly named — it only named
+`video_builder.py` (Sprint 3) — but "integrate the complete pipeline"
+needs this orchestration to live somewhere, and putting it here
+(rather than inline in the API route) keeps `api/chess2fight.py` thin,
+matching that module's own stated principle ("no chess logic or AI
+logic lives here"), and keeps `orchestrator.py` completely untouched —
+this module calls `FightOrchestrator.generate_fight()` as-is, adding
+nothing to it, so every existing Sprint 2 test is unaffected by this
+file's existence.
 
 `FightVideoPipeline.run()` is the single entry point: it reuses
 `FightOrchestrator.generate_fight()` to get everything through
-`prompted_timeline` (already computed by prior Sprint 3 work), then
-generates a `fight_id`, renders every shot to a frame via
-`RenderPipeline`, and assembles those frames into `fight.mp4` via
-`VideoBuilder`.
+`prompted_timeline`, renders every shot to a static reference frame via
+`RenderPipeline`, animates each frame into a per-shot clip via
+`AnimationPipeline` (Sprint 4 Prompt 2 — new), and concatenates those
+clips into the final `fight.mp4` via `VideoBuilder.concatenate_clips`.
+
+Sprint 4 Prompt 2 change, specifically: this used to call
+`VideoBuilder.build_video()` directly on `RenderPipeline`'s static
+frame directory (holding each frame still for a uniform duration).
+It now calls `AnimationPipeline.animate()` first and
+`VideoBuilder.concatenate_clips()` on the resulting per-shot clips
+instead — the final video's per-shot timing now comes from each
+`Shot.duration_seconds` (via `AnimationInstruction`), not a single
+uniform `frame_duration_seconds` applied to everything. The
+`frame_duration_seconds` parameter (and `RenderVideoRequest` field) is
+therefore no longer read by this method — kept on the request schema
+untouched for backward compatibility (an existing caller passing it
+doesn't get a validation error), but it no longer does anything; see
+this module's test suite for a regression test confirming the field
+is still accepted.
 """
 
 from __future__ import annotations
@@ -32,6 +48,7 @@ from pydantic import BaseModel, Field
 from core.ai_router import AIProvider
 from products.chess2fight.cinematic.schemas import Shot
 from products.chess2fight.orchestrator import FightOrchestrator
+from products.chess2fight.rendering.animation_pipeline import AnimationPipeline
 from products.chess2fight.rendering.asset_manager import AssetManager
 from products.chess2fight.rendering.render_pipeline import RenderedFrame, RenderPipeline
 from products.chess2fight.rendering.video_builder import VideoBuilder
@@ -72,20 +89,21 @@ class FightVideoResponse(BaseModel):
 
 
 class FightVideoPipeline:
-    """Runs the complete Sprint 2 + Sprint 3 pipeline for one PGN,
-    producing a finished video.
+    """Runs the complete Sprint 2 + Sprint 3 + Sprint 4 pipeline for
+    one PGN, producing a finished animated video.
 
-    Every dependency is injected — `render_pipeline` and
-    `video_builder` default to fresh instances (which themselves
-    default to the shared `ImageRouter` singleton and the `ffmpeg` on
-    PATH, respectively) so a test can substitute a `RenderPipeline`
-    wired to `MockImageProvider` without any global state.
+    Every dependency is injected — `render_pipeline`, `animation_pipeline`,
+    and `video_builder` default to fresh instances (which themselves
+    default to the shared `ImageRouter`/`AnimationRouter` singletons and
+    the `ffmpeg` on PATH, respectively) so a test can substitute a
+    pipeline wired to mock providers without any global state.
     """
 
     def __init__(
         self,
         ai_provider: AIProvider,
         render_pipeline: RenderPipeline | None = None,
+        animation_pipeline: AnimationPipeline | None = None,
         video_builder: VideoBuilder | None = None,
         asset_manager: AssetManager | None = None,
     ) -> None:
@@ -95,16 +113,24 @@ class FightVideoPipeline:
             ai_provider: Passed through to FightOrchestrator, exactly
                 as api/chess2fight.py already does for the existing
                 `/generate` route.
-            render_pipeline: Renders shots to frames. Defaults to a
-                fresh RenderPipeline (using the shared ImageRouter).
-            video_builder: Assembles frames into a video. Defaults to
-                a fresh VideoBuilder (using `ffmpeg` on PATH).
+            render_pipeline: Renders shots to static reference frames.
+                Defaults to a fresh RenderPipeline (using the shared
+                ImageRouter).
+            animation_pipeline: Animates each reference frame into a
+                per-shot clip. Defaults to a fresh AnimationPipeline
+                (using the shared AnimationRouter) — never a concrete
+                AnimationProvider; see animation_pipeline.py's own
+                module docstring.
+            video_builder: Concatenates the animated clips into the
+                final video. Defaults to a fresh VideoBuilder (using
+                `ffmpeg` on PATH).
             asset_manager: Used only to resolve where a fight's frames
-                were saved, for handing that directory to VideoBuilder.
+                were saved, for locating the final video's output path.
                 Defaults to a fresh AssetManager.
         """
         self._orchestrator = FightOrchestrator(ai_provider)
         self._render_pipeline = render_pipeline or RenderPipeline()
+        self._animation_pipeline = animation_pipeline or AnimationPipeline()
         self._video_builder = video_builder or VideoBuilder()
         self._asset_manager = asset_manager or AssetManager()
 
@@ -127,9 +153,14 @@ class FightVideoPipeline:
             fps: Output video frame rate.
             width: Output video width, in pixels.
             height: Output video height, in pixels.
-            frame_duration_seconds: How long each frame is held in the
-                assembled video — see video_builder.py's docstring for
-                why this is uniform rather than per-shot.
+            frame_duration_seconds: No longer used as of Sprint 4
+                Prompt 2 — each shot's own duration (from
+                Shot.duration_seconds, via AnimationInstruction) now
+                controls its clip's length instead of one uniform
+                value applied to every shot. Still accepted here
+                (and still a field on RenderVideoRequest) purely so an
+                existing caller passing it doesn't get a validation
+                error; it has no effect on the resulting video.
             fight_id: Optional explicit fight identifier. If omitted,
                 a new one is generated — nothing upstream of this
                 pipeline currently carries a persistent fight
@@ -152,21 +183,28 @@ class FightVideoPipeline:
         render_output = await self._render_pipeline.render(
             generate_response.prompted_timeline, resolved_fight_id
         )
-        logger.info("Fight %s: rendered %d frames.", resolved_fight_id, render_output.frame_count)
+        logger.info("Fight %s: rendered %d reference frames.", resolved_fight_id, render_output.frame_count)
+
+        animation_output = await self._animation_pipeline.animate(
+            render_output, generate_response.prompted_timeline, width=width, height=height, fps=fps,
+        )
+        logger.info("Fight %s: animated %d shot clips.", resolved_fight_id, animation_output.shot_count)
+
+        clip_paths = [shot.video_path for shot in animation_output.animated_shots]
+        total_duration_seconds = sum(shot.duration_seconds for shot in animation_output.animated_shots)
 
         video_path = str(self._asset_manager.fight_directory(resolved_fight_id) / "fight.mp4")
-        video_result = await self._video_builder.build_video(
-            frame_directory=render_output.output_dir,
+        video_result = await self._video_builder.concatenate_clips(
+            clip_paths=clip_paths,
             output_path=video_path,
-            frame_count=render_output.frame_count,
+            total_duration_seconds=total_duration_seconds,
             fps=fps,
             width=width,
             height=height,
-            frame_duration_seconds=frame_duration_seconds,
         )
         logger.info(
-            "Fight %s: video assembled at %s (%.1fs).",
-            resolved_fight_id, video_result.video_path, video_result.duration_seconds,
+            "Fight %s: video assembled at %s (%.1fs, %d shot clips).",
+            resolved_fight_id, video_result.video_path, video_result.duration_seconds, len(clip_paths),
         )
 
         return FightVideoResponse(

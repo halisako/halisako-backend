@@ -130,6 +130,96 @@ class VideoBuilder:
             duration_seconds=frame_count * frame_duration_seconds,
         )
 
+    async def concatenate_clips(
+        self,
+        clip_paths: list[str],
+        output_path: str,
+        total_duration_seconds: float,
+        fps: int = 24,
+        width: int = 1024,
+        height: int = 1024,
+    ) -> VideoBuildResult:
+        """Concatenates an ordered list of video clips into one final
+        MP4 — added in Sprint 4 Prompt 2, so animated per-shot clips
+        (rather than static frames) can be assembled into the finished
+        fight video.
+
+        Re-encodes rather than stream-copying (ffmpeg's `-c copy`
+        concat path requires every input clip to already share exactly
+        matching codec parameters, which isn't a safe assumption to
+        make about clips a future real animation provider might
+        produce with per-clip variation) — re-encoding to one
+        consistent `fps`/`width`/`height` is slower but tolerates
+        clips that differ slightly, which stream-copy concatenation
+        does not.
+
+        Args:
+            clip_paths: Ordered paths to the clips to join — the
+                output preserves this order.
+            output_path: Where to write the final MP4.
+            total_duration_seconds: The finished video's expected
+                total duration — the sum of every input clip's own
+                duration, as already known by the caller (each
+                `AnimationResult.duration_seconds`) — used directly
+                rather than re-derived by probing the output, since
+                the caller already has it.
+            fps: Output video frame rate.
+            width: Output video width, in pixels.
+            height: Output video height, in pixels.
+
+        Returns:
+            A VideoBuildResult describing the assembled video.
+            `frame_count` is repurposed here to mean "number of clips
+            concatenated" (there's no static frame count for an
+            animated assembly), and `frame_duration_seconds` is the
+            average clip duration — both kept so this method returns
+            the same result type `build_video` does, rather than
+            introducing a second result schema for what is still
+            fundamentally "VideoBuilder produced an MP4."
+
+        Raises:
+            VideoBuilderError: If ffmpeg isn't available on PATH, no
+                clips were given, an expected clip is missing, or
+                ffmpeg itself fails.
+        """
+        self._require_ffmpeg_available()
+        self._require_clips_present(clip_paths)
+
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        list_file = output_file.parent / f".{output_file.stem}_concat_list.txt"
+        list_file.write_text(
+            "\n".join(f"file '{Path(path).resolve()}'" for path in clip_paths) + "\n"
+        )
+
+        try:
+            command = [
+                self._ffmpeg_binary,
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_file),
+                "-vf", f"scale={width}:{height}",
+                "-r", str(fps),
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                str(output_file),
+            ]
+            await self._run_ffmpeg(command)
+        finally:
+            list_file.unlink(missing_ok=True)
+
+        return VideoBuildResult(
+            video_path=str(output_file),
+            fps=fps,
+            width=width,
+            height=height,
+            frame_count=len(clip_paths),
+            frame_duration_seconds=total_duration_seconds / len(clip_paths),
+            duration_seconds=total_duration_seconds,
+        )
+
     def _require_ffmpeg_available(self) -> None:
         if shutil.which(self._ffmpeg_binary) is None:
             raise VideoBuilderError(f"ffmpeg binary {self._ffmpeg_binary!r} was not found on PATH.")
@@ -140,6 +230,13 @@ class VideoBuilder:
             raise VideoBuilderError(
                 f"Expected frame {first_frame} not found in {frame_directory!r} — nothing to assemble."
             )
+
+    def _require_clips_present(self, clip_paths: list[str]) -> None:
+        if not clip_paths:
+            raise VideoBuilderError("No clips provided to concatenate.")
+        for path in clip_paths:
+            if not Path(path).exists():
+                raise VideoBuilderError(f"Expected clip {path!r} not found — nothing to assemble.")
 
     async def _run_ffmpeg(self, command: list[str]) -> None:
         """Runs an ffmpeg command, raising VideoBuilderError with
