@@ -46,6 +46,7 @@ import uuid
 from pydantic import BaseModel, Field
 
 from core.ai_router import AIProvider
+from core.config import get_settings
 from products.chess2fight.cinematic.schemas import Shot
 from products.chess2fight.orchestrator import FightOrchestrator
 from products.chess2fight.rendering.animation_pipeline import AnimationPipeline
@@ -70,8 +71,18 @@ class RenderVideoRequest(BaseModel):
         default=None, description="Optional structured preferences, same as GenerateRequest."
     )
     fps: int = Field(default=24, gt=0, description="Output video frame rate.")
-    width: int = Field(default=1024, gt=0, description="Output video width, in pixels.")
-    height: int = Field(default=1024, gt=0, description="Output video height, in pixels.")
+    width: int = Field(
+        default_factory=lambda: get_settings().comfyui_animation_default_width,
+        gt=0,
+        description="Output video width, in pixels. Defaults to the Wan-validated resolution "
+        "(settings.comfyui_animation_default_width), not a generic value — see this task's "
+        "engineering notes on why the animation path must never silently resolve to 1024x1024.",
+    )
+    height: int = Field(
+        default_factory=lambda: get_settings().comfyui_animation_default_height,
+        gt=0,
+        description="Output video height, in pixels. Defaults to settings.comfyui_animation_default_height.",
+    )
     frame_duration_seconds: float = Field(
         default=2.0, gt=0, description="How long each frame is held in the output video, in seconds."
     )
@@ -139,8 +150,8 @@ class FightVideoPipeline:
         pgn: str,
         preferences: BattlePreferences,
         fps: int = 24,
-        width: int = 1024,
-        height: int = 1024,
+        width: int | None = None,
+        height: int | None = None,
         frame_duration_seconds: float = 2.0,
         fight_id: str | None = None,
     ) -> FightVideoResponse:
@@ -151,8 +162,17 @@ class FightVideoPipeline:
             preferences: Style/battle-mode preferences, exactly as the
                 existing `/generate` route already accepts.
             fps: Output video frame rate.
-            width: Output video width, in pixels.
-            height: Output video height, in pixels.
+            width: Output video (animation) width, in pixels. Defaults
+                to `settings.comfyui_animation_default_width` (832) —
+                the Wan-validated resolution — not a generic value, so
+                this never silently resolves to 1024x1024. Only
+                affects the animation/video-assembly steps; the still
+                reference image RenderPipeline generates is unaffected
+                either way (it's never passed width/height here at
+                all — see `RenderPipeline.render()`'s own call below).
+            height: Output video (animation) height, in pixels.
+                Defaults to `settings.comfyui_animation_default_height`
+                (480).
             frame_duration_seconds: No longer used as of Sprint 4
                 Prompt 2 — each shot's own duration (from
                 Shot.duration_seconds, via AnimationInstruction) now
@@ -172,6 +192,10 @@ class FightVideoPipeline:
             A FightVideoResponse with the finished video's path, every
             rendered frame's metadata, and the shot-by-shot timeline.
         """
+        settings = get_settings()
+        resolved_width = width if width is not None else settings.comfyui_animation_default_width
+        resolved_height = height if height is not None else settings.comfyui_animation_default_height
+
         resolved_fight_id = fight_id or uuid.uuid4().hex
 
         generate_response = await self._orchestrator.generate_fight(pgn, preferences)
@@ -186,7 +210,8 @@ class FightVideoPipeline:
         logger.info("Fight %s: rendered %d reference frames.", resolved_fight_id, render_output.frame_count)
 
         animation_output = await self._animation_pipeline.animate(
-            render_output, generate_response.prompted_timeline, width=width, height=height, fps=fps,
+            render_output, generate_response.prompted_timeline,
+            width=resolved_width, height=resolved_height, fps=fps,
         )
         logger.info("Fight %s: animated %d shot clips.", resolved_fight_id, animation_output.shot_count)
 
@@ -199,8 +224,8 @@ class FightVideoPipeline:
             output_path=video_path,
             total_duration_seconds=total_duration_seconds,
             fps=fps,
-            width=width,
-            height=height,
+            width=resolved_width,
+            height=resolved_height,
         )
         logger.info(
             "Fight %s: video assembled at %s (%.1fs, %d shot clips).",

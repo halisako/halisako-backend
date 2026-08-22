@@ -228,6 +228,10 @@ def test_prepare_with_cap_still_makes_no_provider_calls(tmp_path):
 
 
 def test_cli_dry_run_prints_both_original_and_effective_duration():
+    """Sprint 4 Prompt 8: the frame count here (17 @ 8fps) reflects
+    the newer live-validated default that superseded Prompt 4's
+    49 @ 24fps — the point being tested (both durations are printed
+    clearly) is unaffected by which default is currently active."""
     result = subprocess.run(
         [sys.executable, "scripts/render_single_shot.py", "--sample", "--shot-index", "0",
          "--max-animation-seconds", "2", "--dry-run"],
@@ -235,7 +239,7 @@ def test_cli_dry_run_prints_both_original_and_effective_duration():
     )
     assert "original shot duration:       7.75s" in result.stdout
     assert "effective animation duration: 2.00s" in result.stdout
-    assert "wan frame count:     49 frames @ 24fps" in result.stdout
+    assert "wan frame count:     17 frames @ 8fps" in result.stdout
 
 
 def test_cli_dry_run_without_cap_states_no_cap_clearly():

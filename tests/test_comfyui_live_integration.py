@@ -54,10 +54,14 @@ pytestmark = pytest.mark.skipif(
 
 # The validated workflow's own proven, proof-quality configuration —
 # using these exact values means a passing run is directly comparable
-# to the original manual validation (640x352, 24fps, 49 frames, 2.04s).
-_VALIDATED_WIDTH = 640
-_VALIDATED_HEIGHT = 352
-_VALIDATED_DURATION_SECONDS = 2.0416667
+# to the live-validated reference (832x480, 8fps, 17 frames, 2.125s).
+# Sprint 4 Prompt 8's newer RunPod RTX 4090 validation superseded
+# Prompt 4's earlier 640x352/24fps/49-frame reference — both are real,
+# live-validated data points; this file compares against the more
+# recent one.
+_VALIDATED_WIDTH = 832
+_VALIDATED_HEIGHT = 480
+_VALIDATED_DURATION_SECONDS = 2.125
 
 
 def _make_reference_image(path: Path) -> str:
@@ -103,8 +107,8 @@ def test_real_image_to_video_generation_produces_actual_motion(tmp_path):
     real provider, through the real validated Wan 2.2 TI2V-5B workflow,
     verified with ffprobe and frame-sampling — not merely an MP4
     container, but confirmed generated motion. Uses the workflow's own
-    proven configuration (640x352, ~2.04s) so a passing result is
-    directly comparable to the original manual validation."""
+    proven configuration (832x480, ~2.125s) so a passing result is
+    directly comparable to the live-validated reference."""
     provider = ComfyUIAnimationProvider(output_dir=str(tmp_path / "out"))
 
     image_path = _make_reference_image(tmp_path / "reference.png")
@@ -147,7 +151,7 @@ def test_real_image_to_video_generation_produces_actual_motion(tmp_path):
     width, height = int(video_stream["width"]), int(video_stream["height"])
     print(f"probed duration: {duration} (validated reference: {_VALIDATED_DURATION_SECONDS})")
     print(f"probed resolution: {width}x{height} (validated reference: {_VALIDATED_WIDTH}x{_VALIDATED_HEIGHT})")
-    print(f"probed fps: {video_stream.get('r_frame_rate')} (validated reference: 24/1)")
+    print(f"probed fps: {video_stream.get('r_frame_rate')} (validated reference: 8/1)")
 
     assert duration > 0
     assert width > 0
@@ -177,3 +181,57 @@ def test_real_image_to_video_generation_produces_actual_motion(tmp_path):
         "Every sampled frame is pixel-identical — this looks like a static image, "
         "not real generated motion."
     )
+
+
+# --- T2V mode (Sprint 4 Prompt 8) ---------------------------------------------
+
+
+def test_t2v_workflow_file_exists_before_attempting_generation():
+    """Same pre-check as the I2V workflow file, for the separate T2V
+    workflow (products/chess2fight/rendering/workflows/wan22_t2v_5b.json)."""
+    settings = get_settings()
+    path = Path(settings.comfyui_t2v_workflow_path)
+    if not path.exists():
+        pytest.fail(f"No T2V workflow file at {path!r}. Has it been moved or deleted?")
+
+
+def test_real_text_to_video_generation_produces_actual_motion():
+    """The T2V proof-of-life: no reference image at all, through the
+    real provider's T2V mode, through the real validated T2V-shaped
+    Wan workflow — verified with ffprobe and frame-sampling, same as
+    the I2V test above."""
+    from core.animation_router import AnimationType
+
+    provider = ComfyUIAnimationProvider()
+    instruction = AnimationInstruction(
+        shot_id="live_test_t2v_shot",
+        prompt="A cinematic close-up of a knight chess piece on a chessboard, "
+        "slowly rotating, dramatic lighting, shallow depth of field.",
+        duration_seconds=_VALIDATED_DURATION_SECONDS,
+        camera_motion="static",
+        subject_motion="rotate",
+        width=_VALIDATED_WIDTH,
+        height=_VALIDATED_HEIGHT,
+        animation_type=AnimationType.TEXT_TO_VIDEO,
+    )
+
+    start = time.monotonic()
+    result = asyncio.run(provider.generate_animation(instruction))
+    generation_time = time.monotonic() - start
+
+    print(f"\nT2V generation_time_seconds: {generation_time:.1f}")
+    print(f"T2V result.success: {result.success}")
+    print(f"T2V result.error_message: {result.error_message}")
+
+    assert result.success, f"T2V generation failed: {result.error_message}"
+    assert result.metadata["mode"] == "t2v"
+    assert Path(result.video_path).exists()
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", result.video_path],
+        capture_output=True, text=True, check=True,
+    )
+    probe_data = json.loads(probe.stdout)
+    duration = float(probe_data["format"]["duration"])
+    print(f"T2V probed duration: {duration} (validated reference: {_VALIDATED_DURATION_SECONDS})")
+    assert duration > 0

@@ -3,7 +3,14 @@ wan22_i2v_5b.json workflow (Sprint 4 Prompt 4) — every ComfyUI HTTP
 call is mocked, but the workflow file itself, its node IDs, and its
 model/config values are the actual supplied artifact, not a stand-in.
 
-For the gated live integration test that requires a real ComfyUI
+TEST CATEGORY (Sprint 4 Prompt 9's explicit distinction): every test in
+this file is a MOCKED UNIT TEST or a LOCAL CONTRACT/INTEGRATION TEST —
+"real" or "actual" in a test name here always refers to the real
+supplied workflow *file*/data being used, never to a real ComfyUI
+server or GPU actually running. None of these tests make a network
+call to anything other than an in-process mock transport.
+
+For the gated TRUE GPU/COMFYUI LIVE TEST that requires a real ComfyUI
 server, see tests/test_comfyui_live_integration.py.
 """
 
@@ -21,6 +28,7 @@ from core.animation_providers.comfyui import (
     ComfyUIRequestError,
     _derive_seed,
     _duration_to_frame_count,
+    _frame_count_to_duration,
     _normalize_dimension,
 )
 from core.animation_router import AnimationInstruction
@@ -164,10 +172,12 @@ def test_workflow_uses_actual_wan_model_names():
 
 def test_fps_expectation_matches_node_57():
     """#8 from the task's list: settings.comfyui_default_fps must match
-    the workflow's own verified CreateVideo (node 57) fps value."""
+    the workflow's own verified CreateVideo (node 57) fps value.
+    Updated Sprint 4 Prompt 8: a newer live validation (832x480, 8fps,
+    17 frames) superseded Prompt 4's 640x352/24fps/49-frame proof."""
     workflow = json.loads(Path(REAL_WORKFLOW_PATH).read_text(encoding="utf-8"))
-    assert workflow["57"]["inputs"]["fps"] == 24
-    assert get_settings().comfyui_default_fps == 24
+    assert workflow["57"]["inputs"]["fps"] == 8
+    assert get_settings().comfyui_default_fps == 8
 
 
 def test_correct_output_node_is_recognized():
@@ -185,9 +195,93 @@ def test_duration_to_frame_count_matches_the_validated_data_point():
     assert _duration_to_frame_count(2.0, 24) == 49
 
 
+def test_duration_to_frame_count_matches_the_newer_validated_data_point():
+    """Sprint 4 Prompt 8/9: 2.0s @ 8fps must produce exactly 17 frames
+    — the newer RunPod RTX 4090 proof's own value, at the current
+    default fps."""
+    assert _duration_to_frame_count(2.0, 8) == 17
+
+
+def test_frame_count_for_short_shots():
+    """A very short shot (well under 1 second) at the default 8fps."""
+    frame_count = _duration_to_frame_count(0.3, 8)
+    assert (frame_count - 1) % 4 == 0
+    assert frame_count >= 1
+
+
+def test_frame_count_for_approximately_2_second_shots_at_default_fps():
+    assert _duration_to_frame_count(2.0, 8) == 17
+
+
+def test_frame_count_for_approximately_3_second_shots_at_default_fps():
+    frame_count = _duration_to_frame_count(3.0, 8)
+    assert (frame_count - 1) % 4 == 0
+    # 3.0 * 8 = 24 raw frames; nearest 4n+1 is 25 (4*6+1).
+    assert frame_count == 25
+
+
+def test_frame_count_boundary_just_below_a_valid_value():
+    """A duration whose raw frame count lands just below a 4n+1
+    boundary (16 raw frames, one below the 17 boundary at 8fps) must
+    still snap to a valid value, not silently stay invalid."""
+    frame_count = _duration_to_frame_count(16 / 8, 8)  # exactly 16 raw frames
+    assert (frame_count - 1) % 4 == 0
+
+
+def test_frame_count_boundary_just_above_a_valid_value():
+    """One raw frame above a 4n+1 boundary (18 raw frames, one above
+    17) must also snap correctly, not overshoot to the next-next value."""
+    frame_count = _duration_to_frame_count(18 / 8, 8)  # exactly 18 raw frames
+    assert (frame_count - 1) % 4 == 0
+    assert frame_count == 17  # 18 is closer to 17 than to 21
+
+
+def test_frame_count_snaps_up_when_closer_to_the_next_boundary():
+    """20 raw frames is 3 away from 17 and only 1 away from 21 —
+    unambiguously closer to the next boundary up."""
+    frame_count = _duration_to_frame_count(20 / 8, 8)  # exactly 20 raw frames
+    assert frame_count == 21
+
+
+def test_frame_count_exact_tie_between_boundaries_resolves_deterministically():
+    """19 raw frames is exactly equidistant between 17 and 21 (both 2
+    away) — Python's round() breaks such ties toward the nearest even
+    number of alignment steps, landing on 17 here. The point of this
+    test isn't which side the tie breaks toward, but that it's
+    deterministic: the same input always produces the same output."""
+    frame_count_a = _duration_to_frame_count(19 / 8, 8)
+    frame_count_b = _duration_to_frame_count(19 / 8, 8)
+    assert frame_count_a == frame_count_b
+    assert (frame_count_a - 1) % 4 == 0
+
+
+def test_frame_count_to_duration_is_the_exact_inverse_arithmetic():
+    assert _frame_count_to_duration(49, 24) == 49 / 24
+    assert _frame_count_to_duration(17, 8) == 17 / 8
+
+
+def test_effective_duration_for_the_two_known_validated_points():
+    """Task 3, requirement #6: the effective resulting duration must
+    be exposable/documented, not just the frame count in isolation."""
+    frames_24fps = _duration_to_frame_count(2.0, 24)
+    assert abs(_frame_count_to_duration(frames_24fps, 24) - 2.0416667) < 0.001
+
+    frames_8fps = _duration_to_frame_count(2.0, 8)
+    assert abs(_frame_count_to_duration(frames_8fps, 8) - 2.125) < 0.001
+
+
 def test_frame_count_always_satisfies_wan_alignment():
     for duration in (0.1, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0):
         frame_count = _duration_to_frame_count(duration, 24)
+        assert (frame_count - 1) % 4 == 0, f"{frame_count} frames does not satisfy (n-1)%4==0"
+
+
+def test_frame_count_always_satisfies_wan_alignment_at_default_fps():
+    """Same check, at the actual production default fps (8), not just
+    the old 24fps reference — representative Chess2Fight shot
+    durations, matching the sample acceptance game's real shots."""
+    for duration in (7.75, 8.91, 12.4, 13.95):
+        frame_count = _duration_to_frame_count(duration, 8)
         assert (frame_count - 1) % 4 == 0, f"{frame_count} frames does not satisfy (n-1)%4==0"
 
 
@@ -215,15 +309,31 @@ def test_dimension_normalization_floors_at_one_alignment_unit():
 
 def test_node_56_receives_uploaded_image_filename(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, _instruction(), uploaded_image_name="my_upload.png")
+    workflow = provider._load_workflow(provider._workflow_path)
+    prepared = provider._inject_i2v_parameters(workflow, _instruction(), uploaded_image_name="my_upload.png")
     assert prepared["56"]["inputs"]["image"] == "my_upload.png"
+
+
+def test_validation_session_filename_never_leaks_into_a_real_request(tmp_path):
+    """Sprint 4 Prompt 9, explicit requirement: the committed
+    wan22_i2v_5b.json's own default LoadImage value (baked in from the
+    original manual RunPod validation session) must never survive
+    injection — every real request must carry the actually-uploaded
+    filename instead."""
+    provider = _provider(tmp_path)
+    workflow = provider._load_workflow(provider._workflow_path)
+    assert workflow["56"]["inputs"]["image"] == "ryu2.jpg"  # confirms what's actually baked into the committed file
+
+    prepared = provider._inject_i2v_parameters(workflow, _instruction(), uploaded_image_name="shot_042_real.png")
+    assert prepared["56"]["inputs"]["image"] != "ryu2.jpg"
+    assert prepared["56"]["inputs"]["image"] == "shot_042_real.png"
+    assert "ryu2.jpg" not in json.dumps(prepared)  # not lingering anywhere else in the graph either
 
 
 def test_positive_prompt_maps_to_node_6(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(
+    workflow = provider._load_workflow(provider._workflow_path)
+    prepared = provider._inject_i2v_parameters(
         workflow, _instruction(prompt="a very specific marker prompt"), uploaded_image_name="x.png"
     )
     assert prepared["6"]["inputs"]["text"] == "a very specific marker prompt"
@@ -231,8 +341,8 @@ def test_positive_prompt_maps_to_node_6(tmp_path):
 
 def test_negative_prompt_maps_to_node_7_when_provided(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(
+    workflow = provider._load_workflow(provider._workflow_path)
+    prepared = provider._inject_i2v_parameters(
         workflow, _instruction(negative_prompt="blurry, low quality"), uploaded_image_name="x.png"
     )
     assert prepared["7"]["inputs"]["text"] == "blurry, low quality"
@@ -243,24 +353,24 @@ def test_negative_prompt_left_untouched_when_not_provided(tmp_path):
     prompt must NOT blank out the workflow's own tuned negative
     prompt on node 7."""
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
+    workflow = provider._load_workflow(provider._workflow_path)
     original_negative = workflow["7"]["inputs"]["text"]
-    prepared = provider._inject_parameters(workflow, _instruction(negative_prompt=None), uploaded_image_name="x.png")
+    prepared = provider._inject_i2v_parameters(workflow, _instruction(negative_prompt=None), uploaded_image_name="x.png")
     assert prepared["7"]["inputs"]["text"] == original_negative
     assert prepared["7"]["inputs"]["text"] != ""
 
 
 def test_seed_maps_to_node_3(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, _instruction(seed=123456), uploaded_image_name="x.png")
+    workflow = provider._load_workflow(provider._workflow_path)
+    prepared = provider._inject_i2v_parameters(workflow, _instruction(seed=123456), uploaded_image_name="x.png")
     assert prepared["3"]["inputs"]["seed"] == 123456
 
 
 def test_seed_falls_back_to_derived_value_when_unset(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(
+    workflow = provider._load_workflow(provider._workflow_path)
+    prepared = provider._inject_i2v_parameters(
         workflow, _instruction(prompt="a specific prompt", seed=None), uploaded_image_name="x.png"
     )
     assert prepared["3"]["inputs"]["seed"] == _derive_seed("a specific prompt")
@@ -268,20 +378,23 @@ def test_seed_falls_back_to_derived_value_when_unset(tmp_path):
 
 def test_width_height_length_map_to_node_55(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(
+    workflow = provider._load_workflow(provider._workflow_path)
+    prepared = provider._inject_i2v_parameters(
         workflow, _instruction(width=640, height=352, duration_seconds=2.0), uploaded_image_name="x.png"
     )
     assert prepared["55"]["inputs"]["width"] == 640
     assert prepared["55"]["inputs"]["height"] == 352
-    assert prepared["55"]["inputs"]["length"] == 49
+    # 2.0s at the new default fps (8, Sprint 4 Prompt 8) -> 17 frames,
+    # not the old 24fps default's 49.
+    assert prepared["55"]["inputs"]["length"] == _duration_to_frame_count(2.0, get_settings().comfyui_default_fps)
+    assert prepared["55"]["inputs"]["length"] == 17
 
 
 def test_injection_does_not_mutate_the_loaded_workflow(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
+    workflow = provider._load_workflow(provider._workflow_path)
     original_text = workflow["6"]["inputs"]["text"]
-    provider._inject_parameters(workflow, _instruction(prompt="different"), uploaded_image_name="x.png")
+    provider._inject_i2v_parameters(workflow, _instruction(prompt="different"), uploaded_image_name="x.png")
     assert workflow["6"]["inputs"]["text"] == original_text
 
 
@@ -290,8 +403,8 @@ def test_model_loader_nodes_are_never_modified(tmp_path):
     ModelSamplingSD3) stay as workflow configuration — never
     request-specific."""
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, _instruction(), uploaded_image_name="x.png")
+    workflow = provider._load_workflow(provider._workflow_path)
+    prepared = provider._inject_i2v_parameters(workflow, _instruction(), uploaded_image_name="x.png")
     for node_id in ("37", "38", "39", "48"):
         assert prepared[node_id] == workflow[node_id]
 
@@ -310,6 +423,56 @@ def test_source_image_uploaded_through_comfyui_api(tmp_path, monkeypatch):
 
     upload_requests = [r for r in transport.requests if r.url.path == "/upload/image"]
     assert len(upload_requests) == 1
+
+
+def test_upload_response_with_a_nonempty_subfolder_is_used_correctly(tmp_path, monkeypatch):
+    """The upload response's subfolder must not be silently discarded
+    — LoadImage.image needs 'subfolder/filename', not just 'filename',
+    when the upload actually landed in a subfolder."""
+
+    def upload_into_subfolder(request):
+        return httpx.Response(200, json={"name": "shot_042.png", "subfolder": "halisako", "type": "input"})
+
+    video_bytes = _make_real_mp4(tmp_path)
+    handlers = _success_handlers(video_bytes)
+    handlers["POST /upload/image"] = upload_into_subfolder
+    transport = _MockTransport(handlers)
+    _patch_httpx_client(monkeypatch, transport)
+
+    provider = _provider(tmp_path)
+    image_path = _make_reference_image(tmp_path)
+    result = asyncio.run(provider.generate_animation(_instruction(source_image_path=image_path)))
+
+    assert result.success is True
+    # Confirmed indirectly: the queue request must carry the combined
+    # subfolder/filename form for node 56, not the bare filename.
+    queue_requests = [r for r in transport.requests if r.url.path == "/prompt"]
+    body = json.loads(queue_requests[0].content)
+    assert body["prompt"]["56"]["inputs"]["image"] == "halisako/shot_042.png"
+
+
+def test_upload_response_with_missing_subfolder_key_defaults_to_bare_filename(tmp_path, monkeypatch):
+    """Defensive per this task's instruction: don't assume an output
+    field exists merely because a mock used it — a response that omits
+    'subfolder' entirely (not just sets it to "") must not crash."""
+
+    def upload_without_subfolder_key(request):
+        return httpx.Response(200, json={"name": "shot_099.png", "type": "input"})  # no "subfolder" key at all
+
+    video_bytes = _make_real_mp4(tmp_path)
+    handlers = _success_handlers(video_bytes)
+    handlers["POST /upload/image"] = upload_without_subfolder_key
+    transport = _MockTransport(handlers)
+    _patch_httpx_client(monkeypatch, transport)
+
+    provider = _provider(tmp_path)
+    image_path = _make_reference_image(tmp_path)
+    result = asyncio.run(provider.generate_animation(_instruction(source_image_path=image_path)))
+
+    assert result.success is True
+    queue_requests = [r for r in transport.requests if r.url.path == "/prompt"]
+    body = json.loads(queue_requests[0].content)
+    assert body["prompt"]["56"]["inputs"]["image"] == "shot_099.png"
 
 
 def test_provider_never_reads_or_writes_a_comfyui_side_filesystem_path():
@@ -335,7 +498,7 @@ def test_provider_never_reads_or_writes_a_comfyui_side_filesystem_path():
 # --- Full successful flow, request construction, response handling ---------
 
 
-def test_full_successful_generation_flow_with_real_workflow(tmp_path, monkeypatch):
+def test_full_mocked_generation_flow_against_the_real_workflow_file(tmp_path, monkeypatch):
     video_bytes = _make_real_mp4(tmp_path)
     transport = _MockTransport(_success_handlers(video_bytes))
     _patch_httpx_client(monkeypatch, transport)
@@ -691,9 +854,9 @@ def test_fps_is_written_to_node_57_not_just_used_for_frame_count_math(tmp_path):
     (CreateVideo)'s own fps input — harmless only because the default
     fps happened to already match the workflow's baked-in value."""
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
+    workflow = provider._load_workflow(provider._workflow_path)
     instruction = _instruction(fps=12, duration_seconds=2.0)
-    prepared = provider._inject_parameters(workflow, instruction, uploaded_image_name="x.png")
+    prepared = provider._inject_i2v_parameters(workflow, instruction, uploaded_image_name="x.png")
 
     assert prepared["57"]["inputs"]["fps"] == 12
     # And frame_count/fps stay consistent with each other regardless
@@ -703,7 +866,7 @@ def test_fps_is_written_to_node_57_not_just_used_for_frame_count_math(tmp_path):
 
 def test_fps_defaults_to_settings_default_when_instruction_fps_unset(tmp_path):
     provider = _provider(tmp_path)
-    workflow = provider._load_workflow()
+    workflow = provider._load_workflow(provider._workflow_path)
     instruction = _instruction(fps=None)
-    prepared = provider._inject_parameters(workflow, instruction, uploaded_image_name="x.png")
+    prepared = provider._inject_i2v_parameters(workflow, instruction, uploaded_image_name="x.png")
     assert prepared["57"]["inputs"]["fps"] == get_settings().comfyui_default_fps

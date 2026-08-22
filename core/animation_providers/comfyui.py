@@ -1,42 +1,60 @@
-"""ComfyUIAnimationProvider: a real image-to-video AnimationProvider
-that communicates with a ComfyUI server's HTTP API to run the
-experimentally-validated Wan 2.2 TI2V-5B workflow at
-products/chess2fight/rendering/workflows/wan22_i2v_5b.json.
+"""ComfyUIAnimationProvider: a real AnimationProvider that communicates
+with a ComfyUI server's HTTP API to run the experimentally-validated
+Wan 2.2 TI2V-5B workflow — in either image-to-video (I2V, primary) or
+text-to-video (T2V, secondary) mode.
 
     AnimationInstruction -> ComfyUIAnimationProvider -> ComfyUI HTTP API -> AnimationResult
 
-SPRINT 4 PROMPT 4 STATUS UPDATE — read this before trusting a claim
-below: Prompt 3 built this class against no real workflow at all
-(every node title was invented). Prompt 4 replaced every placeholder
-with the *actual* node IDs from a real, experimentally-validated
-workflow JSON — supplied, not fabricated — that was manually run on an
-RTX 4090 (CUDA 12.8, Wan 2.2 TI2V-5B) and produced a genuine 640x352,
-24fps, 49-frame (2.04s) MP4 with five distinct sampled-frame hashes,
-confirming real generated motion. That resolves the *workflow
-structure* question. It does NOT resolve whether this Python code
-correctly drives that workflow end-to-end over HTTP — no ComfyUI
-server exists in the environment this code was written in (see this
-feature's engineering report for the environment audit, unchanged
-since Prompt 3). Three confidence tiers apply here, and they're kept
-distinct throughout:
+SPRINT 4 PROMPT 8 STATUS UPDATE — read this before trusting a claim
+below:
+
+Prompt 4 established I2V-only support against one live-validated
+workflow (640x352, 24fps, 49 frames). This task supplied a *newer*
+live validation — a RunPod RTX 4090 run producing both a real T2V and
+a real I2V clip — with different settings (832x480, 8fps, 17 frames,
+8 steps). Both are genuine, live-validated data points from different
+sessions; this backend now uses the more recent one as its default,
+per that task's own instruction to preserve it "unless there is a
+strong reason not to" — it is a supersession, not a guess reconciling
+two conflicting claims.
+
+A discrepancy worth recording plainly: the task supplying these
+artifacts labeled one file "the I2V API-format workflow... the most
+important artifact," and the other as merely useful for "understanding
+the working node structure" of "the small Wan 2.2 test." Inspecting
+the actual JSON structure (not the labels) showed the reverse: the
+file called "the I2V workflow" has no `LoadImage` node and no
+`start_image` wiring on `Wan22ImageToVideoLatent` at all — it is
+structurally text-to-video. The file described as merely a small test
+is the one with a real, wired `LoadImage` -> `start_image` connection
+— structurally image-to-video. Both files share identical settings and
+model filenames otherwise, consistent with being genuine T2V/I2V
+variants of the same validated session, not unrelated or broken
+artifacts. This module treats the verified graph structure as ground
+truth over the accompanying labels: `wan22_i2v_5b.json` is built from
+the file that actually has the image-conditioning wiring;
+`wan22_t2v_5b.json` from the one that doesn't.
+
+Three confidence tiers still apply, as in Prompt 4:
 
 1. ComfyUI's own HTTP API shape (`POST /upload/image`, `POST /prompt`,
    `GET /history/{prompt_id}`, `GET /view`) — stable, documented
    ComfyUI infrastructure. Confident.
-2. This specific workflow's node IDs, input keys, and model filenames
-   — read directly from the supplied wan22_i2v_5b.json, not guessed.
-   Confident, for exactly what the file contains.
+2. Both workflows' node IDs, input keys, and model filenames — read
+   directly from the supplied JSON files, not guessed. Confident, for
+   exactly what those files contain (see the structural note above for
+   how that confidence was actually established, not just assumed from
+   a filename).
 3. Wan22ImageToVideoLatent's *constraints* (frame-count alignment,
    dimension alignment) and which key SaveVideo's history output
-   appears under — researched (web search against ComfyUI's public
-   source/docs/community reports), not verified against a live
-   instance. Each such claim is marked with its actual sourcing below,
-   not overstated as "verified."
+   appears under — researched (Prompt 4), not verified against a live
+   instance. Unchanged by this task.
 
-Until `COMFYUI_LIVE_TEST=1` succeeds against a real server, treat this
-provider as "matches the validated workflow structure, HTTP logic
-unverified" — a meaningfully stronger claim than Prompt 3's "entirely
-unverified," but still short of "known to work."
+No ComfyUI server exists in the environment this code was written in
+(see this feature's engineering report for the environment audit,
+unchanged since Prompt 3). Until `COMFYUI_LIVE_TEST=1` succeeds against
+a real server, treat this provider as "matches validated workflow
+structure for both modes, HTTP logic unverified in this environment."
 """
 
 from __future__ import annotations
@@ -53,7 +71,7 @@ from typing import Any
 
 import httpx
 
-from core.animation_router import AnimationInstruction, AnimationProvider, AnimationResult
+from core.animation_router import AnimationInstruction, AnimationProvider, AnimationResult, AnimationType
 from core.config import get_settings
 
 settings = get_settings()
@@ -80,25 +98,47 @@ _NODE_IMAGE_TO_VIDEO_LATENT = "55"
 _NODE_CREATE_VIDEO = "57"
 _NODE_SAVE_VIDEO = "58"
 
-# The validated workflow's own proof-quality resolution — used as the
-# default when AnimationInstruction doesn't specify one (matches
-# AnimationInstruction's own schema default of 1024x1024 being
-# overridden here, since 640x352 is what's actually been proven to
-# work with this exact workflow, not a generic guess).
-_DEFAULT_WIDTH = 640
-_DEFAULT_HEIGHT = 352
+# T2V's node IDs happen to be identical to I2V's for everything except
+# the image — both were exported from the same underlying graph
+# structure with the image-conditioning branch removed for T2V (see
+# module docstring). Kept as separate names, not aliased to the I2V
+# constants above, so a future edit to one workflow's node numbering
+# doesn't silently affect the other just because today's values match.
+_T2V_NODE_POSITIVE_PROMPT = "6"
+_T2V_NODE_NEGATIVE_PROMPT = "7"
+_T2V_NODE_SAMPLER = "3"
+_T2V_NODE_VIDEO_LATENT = "55"  # no start_image input on this node in the T2V workflow — never set
+_T2V_NODE_CREATE_VIDEO = "57"
+_T2V_NODE_SAVE_VIDEO = "58"
+
+# The validated workflow's own proof-quality resolution — documented
+# here as the reference values a caller should pass to match what's
+# actually been proven to work with this exact workflow. NOT an active
+# fallback inside _inject_i2v_parameters/_inject_t2v_parameters, which
+# always use whatever instruction.width/.height the caller actually
+# supplied (defaulting to AnimationInstruction's own generic 1024x1024
+# schema default if the caller passed nothing) — deliberately, so this
+# provider never silently substitutes a different resolution than what
+# was asked for, matching the same reasoning already applied to
+# ComfyUIImageProvider's own resolution handling (Prompt 6). A caller
+# that wants the validated resolution should pass width=832, height=480
+# explicitly. Sprint 4 Prompt 8's newer live validation superseded
+# Prompt 4's 640x352 as the recorded reference values.
+_DEFAULT_WIDTH = 832
+_DEFAULT_HEIGHT = 480
 
 # Wan22ImageToVideoLatent's dimension-alignment requirement: width and
 # height must be a multiple of 16. SOURCED: docs.comfy.org's own
 # Wan22ImageToVideoLatent reference page states this explicitly for
 # this exact node ("The width and height parameters must be divisible
 # by 16 for proper latent space dimensions") — confirmed, not
-# inferred. 640 % 16 == 0 and 352 % 16 == 0, consistent with the
-# validated workflow's own values.
+# inferred. 832 % 16 == 0 and 480 % 16 == 0, consistent with the
+# validated workflow's own values (and with Prompt 4's earlier
+# 640x352, which also satisfied this).
 _DIMENSION_ALIGNMENT = 16
 
 # Wan22ImageToVideoLatent's frame-count alignment: `length` must
-# satisfy (length - 1) % 4 == 0 (i.e. 1, 5, 9, ..., 49, ...).
+# satisfy (length - 1) % 4 == 0 (i.e. 1, 5, 9, ..., 17, ..., 49, ...).
 # SOURCED WITH LESS CERTAINTY than the dimension rule above: this is
 # not confirmed from Wan22ImageToVideoLatent's own source directly
 # (unavailable to inspect in this environment). It's inferred from
@@ -107,10 +147,12 @@ _DIMENSION_ALIGNMENT = 16
 # `"step": 4, "min": 1`; (b) multiple independent ComfyUI-Wiki/tutorial
 # sources for Wan22ImageToVideoLatent specifically cite default/
 # recommended lengths of 41, 81, and 121 frames — all satisfying this
-# same pattern; (c) the validated workflow's own 49 frames also
-# satisfies it (49 = 4*12 + 1). Three independent, converging sources
-# is strong circumstantial evidence, not a single authoritative
-# confirmation for this exact node — treat accordingly.
+# same pattern; (c) Prompt 4's validated workflow used 49 frames
+# (= 4*12 + 1); (d) Prompt 8's newer validated workflow uses 17 frames
+# (= 4*4 + 1) — a second, independent live data point satisfying the
+# same rule. Four independent, converging sources is strong
+# circumstantial evidence, not a single authoritative confirmation for
+# this exact node — treat accordingly.
 _LENGTH_ALIGNMENT = 4
 _LENGTH_MINIMUM = 1
 
@@ -170,16 +212,52 @@ def _normalize_dimension(value: int, alignment: int = _DIMENSION_ALIGNMENT) -> i
 
 
 def _duration_to_frame_count(duration_seconds: float, fps: int) -> int:
-    """Converts a requested duration into a Wan-valid frame count,
-    snapping to the nearest value satisfying (length - 1) % 4 == 0 —
-    see `_LENGTH_ALIGNMENT`'s docstring above for exactly how
-    confident that constraint is. Verified against the one known-good
-    data point available: 2.0s at 24fps produces 49 frames here,
-    exactly matching the validated workflow's own proven value.
+    """Converts a requested duration into a Wan-valid frame count.
+
+    The rounding rule, explicitly, in three steps:
+
+    1. Compute the raw frame count a naive `duration * fps` would give,
+       rounded to the nearest whole frame (never below
+       `_LENGTH_MINIMUM`, currently 1).
+    2. Wan's `Wan22ImageToVideoLatent.length` must satisfy
+       `(length - 1) % _LENGTH_ALIGNMENT == 0` (i.e. 1, 5, 9, ..., 17,
+       ..., 49, ...) — see `_LENGTH_ALIGNMENT`'s own module-level
+       docstring for exactly how confident that constraint is and
+       what it's sourced from. Step 1's raw count is snapped to the
+       *nearest* such value (not floored or ceiled) — `round()` on
+       `(raw_frame_count - _LENGTH_MINIMUM) / _LENGTH_ALIGNMENT`, i.e.
+       the nearest whole number of alignment steps above the minimum.
+    3. The snapped value is floored at `_LENGTH_MINIMUM` again, in
+       case step 2's rounding went below it for a very short duration.
+
+    This is deterministic: the same (duration_seconds, fps) pair
+    always produces the same frame count, with no randomness or
+    external state involved.
+
+    Verified against two known-good data points: 2.0s at 24fps
+    produces 49 frames (Sprint 4 Prompt 4's original RTX 4090 proof);
+    2.0s at 8fps produces 17 frames (Sprint 4 Prompt 8's newer RunPod
+    RTX 4090 proof) — both exactly matching their respective validated
+    workflow's own proven value.
+
+    Because frame count is snapped to the nearest valid value rather
+    than computed exactly, the resulting clip's *actual* duration
+    almost never exactly equals the requested `duration_seconds` — use
+    `_frame_count_to_duration()` to compute what it actually will be.
     """
     raw_frame_count = max(_LENGTH_MINIMUM, round(duration_seconds * fps))
     steps = round((raw_frame_count - _LENGTH_MINIMUM) / _LENGTH_ALIGNMENT)
     return max(_LENGTH_MINIMUM, steps * _LENGTH_ALIGNMENT + _LENGTH_MINIMUM)
+
+
+def _frame_count_to_duration(frame_count: int, fps: int) -> float:
+    """The exact inverse arithmetic of `_duration_to_frame_count`'s
+    first step — the effective duration a given (already Wan-valid or
+    not) frame count actually produces at `fps`. Exposed so a caller
+    can report "you asked for 2.0s; Wan will actually produce
+    {_frame_count_to_duration(_duration_to_frame_count(2.0, fps), fps)}s"
+    rather than silently letting the two values differ unremarked."""
+    return frame_count / fps
 
 
 def _derive_seed(prompt: str) -> int:
@@ -214,6 +292,7 @@ class ComfyUIAnimationProvider(AnimationProvider):
         self,
         base_url: str | None = None,
         workflow_path: str | None = None,
+        t2v_workflow_path: str | None = None,
         timeout_seconds: float | None = None,
         output_dir: str | None = None,
         default_fps: int | None = None,
@@ -222,8 +301,14 @@ class ComfyUIAnimationProvider(AnimationProvider):
 
         Args:
             base_url: ComfyUI server URL. Defaults to `settings.comfyui_base_url`.
-            workflow_path: Path to the ComfyUI API-format workflow JSON.
-                Defaults to `settings.comfyui_workflow_path`.
+            workflow_path: Path to the I2V ComfyUI API-format workflow
+                JSON. Defaults to `settings.comfyui_workflow_path`.
+            t2v_workflow_path: Path to the T2V ComfyUI API-format
+                workflow JSON — a genuinely different graph (no
+                LoadImage/start_image at all), not the same file with a
+                flag. Defaults to `settings.comfyui_t2v_workflow_path`.
+                Only loaded when an instruction's `animation_type` is
+                `TEXT_TO_VIDEO`.
             timeout_seconds: Maximum time to wait for one generation to
                 complete. Defaults to `settings.comfyui_timeout_seconds`.
             output_dir: Where to save downloaded clips. Defaults to
@@ -232,12 +317,15 @@ class ComfyUIAnimationProvider(AnimationProvider):
                 the same configured location).
             default_fps: Used to convert `duration_seconds` into a
                 frame count when `instruction.fps` is unset. Defaults
-                to `settings.comfyui_default_fps`, now 24 — verified
-                directly from the validated workflow's own node 57
-                (CreateVideo) `fps` input, not a placeholder.
+                to `settings.comfyui_default_fps`, now 8 — Sprint 4
+                Prompt 8's newer live validation superseded Prompt 4's
+                24 (see module docstring).
         """
         self._base_url = (base_url if base_url is not None else settings.comfyui_base_url).rstrip("/")
         self._workflow_path = workflow_path if workflow_path is not None else settings.comfyui_workflow_path
+        self._t2v_workflow_path = (
+            t2v_workflow_path if t2v_workflow_path is not None else settings.comfyui_t2v_workflow_path
+        )
         self._timeout_seconds = (
             timeout_seconds if timeout_seconds is not None else settings.comfyui_timeout_seconds
         )
@@ -246,25 +334,38 @@ class ComfyUIAnimationProvider(AnimationProvider):
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
     async def generate_animation(self, instruction: AnimationInstruction) -> AnimationResult:
+        is_t2v = instruction.animation_type == AnimationType.TEXT_TO_VIDEO
+
         try:
-            workflow = self._load_workflow()
+            workflow = self._load_workflow(self._t2v_workflow_path if is_t2v else self._workflow_path)
         except FileNotFoundError as exc:
             return self._failure(instruction, str(exc))
 
-        if not Path(instruction.source_image_path).exists():
-            return self._failure(
-                instruction, f"Reference image not found: {instruction.source_image_path!r}."
-            )
+        if not is_t2v:
+            # AnimationInstruction's own model validator already
+            # guarantees source_image_path is set whenever
+            # animation_type isn't TEXT_TO_VIDEO — this checks the file
+            # actually exists on disk, which no schema validator can.
+            if not Path(instruction.source_image_path).exists():
+                return self._failure(
+                    instruction, f"Reference image not found: {instruction.source_image_path!r}."
+                )
 
         prompt_id = None
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                try:
-                    uploaded_name = await self._upload_image(client, instruction.source_image_path)
-                except httpx.HTTPError as exc:
-                    return self._failure(instruction, f"Image upload to ComfyUI failed: {exc}")
+                uploaded_name = None
+                if not is_t2v:
+                    try:
+                        uploaded_name = await self._upload_image(client, instruction.source_image_path)
+                    except httpx.HTTPError as exc:
+                        return self._failure(instruction, f"Image upload to ComfyUI failed: {exc}")
 
-                prepared_workflow = self._inject_parameters(workflow, instruction, uploaded_name)
+                prepared_workflow = (
+                    self._inject_t2v_parameters(workflow, instruction)
+                    if is_t2v
+                    else self._inject_i2v_parameters(workflow, instruction, uploaded_name)
+                )
 
                 try:
                     prompt_id = await self._queue_prompt(client, prepared_workflow)
@@ -272,7 +373,10 @@ class ComfyUIAnimationProvider(AnimationProvider):
                     return self._failure(instruction, f"Workflow submission to ComfyUI failed: {exc}")
                 except ComfyUIRequestError as exc:
                     return self._failure(instruction, f"ComfyUI rejected the workflow: {exc}")
-                logger.info("ComfyUI: queued prompt_id=%s for shot %s.", prompt_id, instruction.shot_id)
+                logger.info(
+                    "ComfyUI: queued prompt_id=%s for shot %s (mode=%s).",
+                    prompt_id, instruction.shot_id, "t2v" if is_t2v else "i2v",
+                )
 
                 try:
                     history_entry = await self._wait_for_completion(client, prompt_id)
@@ -284,7 +388,9 @@ class ComfyUIAnimationProvider(AnimationProvider):
                     return self._failure(instruction, f"Polling ComfyUI for completion failed: {exc}")
 
                 try:
-                    filename, subfolder, file_type = self._extract_output_reference(history_entry)
+                    filename, subfolder, file_type = self._extract_output_reference(
+                        history_entry, _T2V_NODE_SAVE_VIDEO if is_t2v else _NODE_SAVE_VIDEO
+                    )
                 except ComfyUIRequestError as exc:
                     return self._failure(instruction, f"History/output missing: {exc}")
 
@@ -320,6 +426,7 @@ class ComfyUIAnimationProvider(AnimationProvider):
             metadata={
                 "prompt_id": prompt_id,
                 "comfyui_base_url": self._base_url,
+                "mode": "t2v" if is_t2v else "i2v",
                 "model": "wan2.2_ti2v_5B_fp16.safetensors",
                 "vae": "wan2.2_vae.safetensors",
                 "text_encoder": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
@@ -333,18 +440,25 @@ class ComfyUIAnimationProvider(AnimationProvider):
 
     # --- Workflow loading and parameter injection ---------------------------
 
-    def _load_workflow(self) -> dict[str, Any]:
-        """Loads the ComfyUI API-format workflow JSON from disk.
+    def _load_workflow(self, path_str: str) -> dict[str, Any]:
+        """Loads a ComfyUI API-format workflow JSON from disk.
+
+        Args:
+            path_str: Which workflow file to load — the caller decides
+                between `self._workflow_path` (I2V) and
+                `self._t2v_workflow_path` (T2V) based on the
+                instruction's `animation_type`.
 
         Raises:
             FileNotFoundError: If no workflow file exists at the
                 configured path.
         """
-        path = Path(self._workflow_path)
+        path = Path(path_str)
         if not path.exists():
             raise FileNotFoundError(
                 f"ComfyUI workflow file not found at {path!r}. Expected the validated "
-                "wan22_i2v_5b.json — see products/chess2fight/rendering/workflows/README.md."
+                "wan22_i2v_5b.json or wan22_t2v_5b.json — see "
+                "products/chess2fight/rendering/workflows/README.md."
             )
         # Explicit encoding, not Path.read_text()'s platform default: this
         # workflow's negative prompt (node 7) is non-ASCII Chinese text —
@@ -352,29 +466,28 @@ class ComfyUIAnimationProvider(AnimationProvider):
         # would raise or silently corrupt it. Sprint 4 Prompt 7.1.
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def _inject_parameters(
+    def _inject_i2v_parameters(
         self, workflow: dict[str, Any], instruction: AnimationInstruction, uploaded_image_name: str
     ) -> dict[str, Any]:
-        """Injects AnimationInstruction values into the loaded workflow
-        graph, at the exact node IDs read from the validated
-        wan22_i2v_5b.json — see the module-level `_NODE_*` constants.
+        """Injects AnimationInstruction values into a *copy* of the
+        loaded I2V workflow graph, at the exact node IDs read from the
+        validated wan22_i2v_5b.json — see the module-level `_NODE_*`
+        constants. The original loaded dict is never mutated.
 
         The negative prompt is deliberately NOT overwritten when
         `instruction.negative_prompt` is unset — the validated workflow
         ships with a real, substantial, tuned negative prompt (node 7);
-        Prompt 3's version of this method unconditionally overwrote it
+        an earlier version of this method unconditionally overwrote it
         with an empty string whenever the caller didn't supply one,
-        which would have silently discarded that tuned content. This
-        is a correction, not a stylistic change.
+        which would have silently discarded that tuned content.
 
         `fps` is written to node 57 (CreateVideo), not just used to
-        compute `frame_count` — Prompt 4/5's version computed fps but
+        compute `frame_count` — an earlier version computed fps but
         never actually wrote it to the node, which happened not to
         matter while every caller used the default (which already
-        matches the workflow's own baked-in 24), but would silently
-        mismatch frame_count against playback rate for any other fps.
-        Fixed here, not just noted, per this task's "verify the
-        current Wan mappings" instruction.
+        matched the workflow's own baked-in value at the time), but
+        would silently mismatch frame_count against playback rate for
+        any other fps.
         """
         fps = instruction.fps or self._default_fps
         frame_count = _duration_to_frame_count(instruction.duration_seconds, fps)
@@ -396,16 +509,73 @@ class ComfyUIAnimationProvider(AnimationProvider):
 
         return prepared
 
+    def _inject_t2v_parameters(self, workflow: dict[str, Any], instruction: AnimationInstruction) -> dict[str, Any]:
+        """Injects AnimationInstruction values into a *copy* of the
+        loaded T2V workflow graph. The original loaded dict is never
+        mutated.
+
+        Never touches an image node — the T2V workflow (Sprint 4
+        Prompt 8's `wan22_t2v_5b.json`) has no `LoadImage` node and no
+        `start_image` input on `Wan22ImageToVideoLatent` at all (see
+        module docstring); there is nothing to set. Everything else
+        mirrors `_inject_i2v_parameters`'s reasoning (negative-prompt
+        preservation, fps written to the CreateVideo node) exactly —
+        this is a genuinely different graph, not different logic.
+        """
+        fps = instruction.fps or self._default_fps
+        frame_count = _duration_to_frame_count(instruction.duration_seconds, fps)
+        seed = instruction.seed if instruction.seed is not None else _derive_seed(instruction.prompt)
+        width = _normalize_dimension(instruction.width)
+        height = _normalize_dimension(instruction.height)
+
+        prepared = json.loads(json.dumps(workflow))  # plain-JSON deep copy
+
+        prepared[_T2V_NODE_POSITIVE_PROMPT]["inputs"]["text"] = instruction.prompt
+        if instruction.negative_prompt:
+            prepared[_T2V_NODE_NEGATIVE_PROMPT]["inputs"]["text"] = instruction.negative_prompt
+        prepared[_T2V_NODE_SAMPLER]["inputs"]["seed"] = seed
+        prepared[_T2V_NODE_VIDEO_LATENT]["inputs"]["width"] = width
+        prepared[_T2V_NODE_VIDEO_LATENT]["inputs"]["height"] = height
+        prepared[_T2V_NODE_VIDEO_LATENT]["inputs"]["length"] = frame_count
+        prepared[_T2V_NODE_CREATE_VIDEO]["inputs"]["fps"] = fps
+
+        return prepared
+
     # --- ComfyUI HTTP API calls -----------------------------------------------
 
     async def _upload_image(self, client: httpx.AsyncClient, image_path: str) -> str:
+        """Uploads a local image to ComfyUI and returns the value its
+        `LoadImage` node's `image` input should be set to.
+
+        Defensive about the response shape, per this task's explicit
+        instruction not to assume an output field exists merely
+        because a mock used it: `name` is treated as required (a
+        missing one is a genuine upload failure, surfaced as a
+        KeyError caught by `generate_animation`'s outer handler); a
+        missing `subfolder` is tolerated and treated as empty, since
+        ComfyUI's own `/upload/image` omits it entirely for a plain
+        root-level upload in some versions rather than returning `""`
+        explicitly — both are valid, unremarkable responses.
+
+        Uses ComfyUI's own `subfolder/filename` convention for
+        `LoadImage.image` when a non-empty subfolder is returned
+        (rather than silently discarding it and passing just the bare
+        filename, which would point `LoadImage` at the wrong file if
+        the upload landed in a subfolder) — this previously discarded
+        the subfolder unconditionally; harmless while ComfyUI happens
+        to return an empty subfolder for a plain upload, but wrong for
+        any upload that doesn't.
+        """
         image_bytes = Path(image_path).read_bytes()
         response = await client.post(
             f"{self._base_url}/upload/image",
             files={"image": (Path(image_path).name, image_bytes, "image/png")},
         )
         response.raise_for_status()
-        return response.json()["name"]
+        data = response.json()
+        filename = data["name"]
+        subfolder = data.get("subfolder", "")
+        return f"{subfolder}/{filename}" if subfolder else filename
 
     async def _queue_prompt(self, client: httpx.AsyncClient, workflow: dict[str, Any]) -> str:
         response = await client.post(
@@ -433,23 +603,32 @@ class ComfyUIAnimationProvider(AnimationProvider):
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
         raise TimeoutError(f"did not complete within {self._timeout_seconds}s (prompt_id={prompt_id}).")
 
-    def _extract_output_reference(self, history_entry: dict[str, Any]) -> tuple[str, str, str]:
+    def _extract_output_reference(self, history_entry: dict[str, Any], save_video_node_id: str) -> tuple[str, str, str]:
         """Resolves the generated video's filename/subfolder/type from
         ComfyUI's own history response — never guesses a filename (see
         `_VIDEO_OUTPUT_KEYS`'s module-level docstring for exactly how
         confident this key-matching is, including a known,
-        unresolved community-reported risk with this exact node)."""
+        unresolved community-reported risk with this exact node).
+
+        Args:
+            history_entry: This job's entry from ComfyUI's /history response.
+            save_video_node_id: Which node ID to check first —
+                `_NODE_SAVE_VIDEO` for I2V or `_T2V_NODE_SAVE_VIDEO`
+                for T2V (currently equal, but passed explicitly rather
+                than hardcoded, since the two workflows are maintained
+                as separate files that could diverge).
+        """
         outputs = history_entry.get("outputs", {})
 
-        node_58_output = outputs.get(_NODE_SAVE_VIDEO, {})
+        primary_output = outputs.get(save_video_node_id, {})
         for key in _VIDEO_OUTPUT_KEYS:
-            if key in node_58_output and node_58_output[key]:
-                entry = node_58_output[key][0]
+            if key in primary_output and primary_output[key]:
+                entry = primary_output[key][0]
                 return entry["filename"], entry.get("subfolder", ""), entry.get("type", "output")
 
         # Fall back to scanning every node's output, in case the
-        # reporting node ID doesn't match _NODE_SAVE_VIDEO at runtime
-        # for some reason (defensive, not expected).
+        # reporting node ID doesn't match at runtime for some reason
+        # (defensive, not expected).
         for node_output in outputs.values():
             for key in _VIDEO_OUTPUT_KEYS:
                 if key in node_output and node_output[key]:
@@ -457,7 +636,7 @@ class ComfyUIAnimationProvider(AnimationProvider):
                     return entry["filename"], entry.get("subfolder", ""), entry.get("type", "output")
 
         raise ComfyUIRequestError(
-            f"no video output found under node {_NODE_SAVE_VIDEO!r} or any other node, "
+            f"no video output found under node {save_video_node_id!r} or any other node, "
             f"checked keys {_VIDEO_OUTPUT_KEYS!r}."
         )
 

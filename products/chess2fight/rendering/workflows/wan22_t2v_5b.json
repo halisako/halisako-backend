@@ -1,7 +1,7 @@
 {
   "3": {
     "inputs": {
-      "seed": 587306602328202,
+      "seed": 173190621727135,
       "steps": 8,
       "cfg": 5,
       "sampler_name": "uni_pc",
@@ -31,7 +31,7 @@
   },
   "6": {
     "inputs": {
-      "text": "Cinematic battle animation. The character comes alive and moves forward with controlled aggressive motion, subtle body movement and dynamic cloth motion. The camera slowly pushes forward. Dramatic cinematic lighting, natural motion, consistent character appearance, stable environment.",
+      "text": "A cinematic close-up of a knight chess piece on a chessboard, slowly rotating, dramatic lighting, shallow depth of field.",
       "clip": [
         "38",
         0
@@ -44,7 +44,7 @@
   },
   "7": {
     "inputs": {
-      "text": "blurry, low quality, distorted, deformed, flicker, duplicated body parts, changing character appearance, warped face, unstable background, camera shake",
+      "text": "blurry, low quality, distorted, flicker, extra objects",
       "clip": [
         "38",
         0
@@ -123,24 +123,11 @@
       "vae": [
         "39",
         0
-      ],
-      "start_image": [
-        "56",
-        0
       ]
     },
     "class_type": "Wan22ImageToVideoLatent",
     "_meta": {
       "title": "Wan22ImageToVideoLatent"
-    }
-  },
-  "56": {
-    "inputs": {
-      "image": "ryu2.jpg"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Load Image"
     }
   },
   "57": {

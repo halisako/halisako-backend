@@ -252,26 +252,37 @@ class SingleShotAcceptanceRunner:
     async def execute(
         self,
         plan: SingleShotPlan,
-        width: int = 1280,
-        height: int = 704,
+        width: int | None = None,
+        height: int | None = None,
     ) -> SingleShotAcceptanceResult:
         """Actually renders and animates the planned shot, via the
         real, currently-configured ImageRouter/AnimationRouter.
 
         Args:
             plan: A plan from `prepare()`.
-            width: Output width for the reference image/clip. Defaults
-                to 1280 — the experimentally-validated FLUX resolution
-                (Sprint 4 Prompt 6), not the generic 1024 default,
-                since this path is specifically for exercising the
-                real, validated ComfyUI-shaped providers.
-            height: Output height. Defaults to 704, pairing with the
-                width default above.
+            width: Output width for the animated clip. Defaults to
+                `settings.comfyui_animation_default_width` (832) — the
+                Wan-validated resolution (Sprint 4 Prompt 8/9), not a
+                generic value. Note this affects only the animation
+                step: `RenderPipeline.render()` below is never passed
+                width/height at all, so the still reference image's
+                resolution is whatever the configured ImageProvider
+                itself defaults to, independent of this parameter. An
+                earlier version of this docstring claimed this also
+                controlled "the reference image," which the code never
+                actually did — corrected here, not just the default
+                value.
+            height: Output height for the animated clip. Defaults to
+                `settings.comfyui_animation_default_height` (480).
 
         Returns:
             A SingleShotAcceptanceResult with the real local image and
             video paths.
         """
+        settings = get_settings()
+        resolved_width = width if width is not None else settings.comfyui_animation_default_width
+        resolved_height = height if height is not None else settings.comfyui_animation_default_height
+
         render_timeline = self._build_single_shot_timeline(plan, plan.shot)
         render_output = await self._render_pipeline.render(render_timeline, plan.fight_id)
 
@@ -293,7 +304,7 @@ class SingleShotAcceptanceRunner:
             animation_timeline = self._build_single_shot_timeline(plan, animation_shot)
 
         animation_output = await self._animation_pipeline.animate(
-            render_output, animation_timeline, width=width, height=height, fps=plan.fps,
+            render_output, animation_timeline, width=resolved_width, height=resolved_height, fps=plan.fps,
         )
 
         # Exactly one shot in, exactly one animated clip out — asserted,

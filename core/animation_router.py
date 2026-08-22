@@ -103,7 +103,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from core.config import get_settings
 from core.exceptions import AnimationProviderError
@@ -136,7 +136,12 @@ class AnimationInstruction(BaseModel):
     """
 
     shot_id: str = Field(..., min_length=1, description="ID of the Shot this instruction animates.")
-    source_image_path: str = Field(..., min_length=1, description="Path to the primary reference image to animate.")
+    source_image_path: str | None = Field(
+        default=None,
+        description="Path to the primary reference image to animate. Required when animation_type is "
+        "IMAGE_TO_VIDEO or IMAGE_SEQUENCE_TO_VIDEO (enforced below); left unset for TEXT_TO_VIDEO, "
+        "which has no reference image at all.",
+    )
     reference_image_paths: list[str] = Field(
         default_factory=list, description="Optional secondary/reference images, for providers that use them."
     )
@@ -166,6 +171,15 @@ class AnimationInstruction(BaseModel):
         default=AnimationType.IMAGE_TO_VIDEO, description="Which generation modality this instruction calls for."
     )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Free-form extra context.")
+
+    @model_validator(mode="after")
+    def _require_source_image_for_image_based_modes(self) -> "AnimationInstruction":
+        image_based = (AnimationType.IMAGE_TO_VIDEO, AnimationType.IMAGE_SEQUENCE_TO_VIDEO)
+        if self.animation_type in image_based and not self.source_image_path:
+            raise ValueError(
+                f"source_image_path is required when animation_type is {self.animation_type.value!r}."
+            )
+        return self
 
 
 class AnimationResult(BaseModel):
@@ -250,6 +264,13 @@ class MockAnimationProvider(AnimationProvider):
         return VideoBuilder()
 
     async def generate_animation(self, instruction: AnimationInstruction) -> AnimationResult:
+        if not instruction.source_image_path:
+            return AnimationResult(
+                success=False, shot_id=instruction.shot_id, provider="MockAnimationProvider",
+                error_message="MockAnimationProvider only supports image-based animation (it holds the "
+                "source image static) — it has no text-to-video mode. Got animation_type="
+                f"{instruction.animation_type.value!r} with no source_image_path.",
+            )
         if not Path(instruction.source_image_path).exists():
             return AnimationResult(
                 success=False, shot_id=instruction.shot_id, provider="MockAnimationProvider",

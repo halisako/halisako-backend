@@ -82,12 +82,43 @@ class Settings(BaseSettings):
     comfyui_base_url: str = "http://localhost:8188"
     comfyui_timeout_seconds: float = 300.0
     comfyui_workflow_path: str = "products/chess2fight/rendering/workflows/wan22_i2v_5b.json"
+    # Sprint 4 Prompt 8: a second, genuinely text-to-video-shaped
+    # workflow (no LoadImage/start_image at all) for
+    # AnimationInstruction.animation_type == TEXT_TO_VIDEO. See
+    # core/animation_providers/comfyui.py's module docstring for why
+    # this is a separate file rather than one template with a
+    # disabled image branch: the two live-validated workflows this
+    # backend was handed genuinely differ at the graph-structure
+    # level, not just by an input value.
+    comfyui_t2v_workflow_path: str = "products/chess2fight/rendering/workflows/wan22_t2v_5b.json"
+
+    # Sprint 4 Prompt 9 -- explicit Wan runtime policy: the
+    # Chess2Fight-specific animation call sites (FightVideoPipeline.run(),
+    # SingleShotAcceptanceRunner.execute()) resolve their width/height
+    # from THESE values, not AnimationInstruction's own generic
+    # 1024x1024 schema default -- so the production Wan path can never
+    # silently run at a resolution nobody validated. AnimationInstruction
+    # itself is untouched (still 1024x1024): that's the neutral,
+    # provider-agnostic contract default, appropriate for a future
+    # non-Wan animation provider that has never validated 832x480 at
+    # all -- this policy lives at the Chess2Fight/Wan-specific call
+    # sites, not in the generic abstraction.
+    comfyui_animation_default_width: int = 832
+    comfyui_animation_default_height: int = 480
     # Used only to convert AnimationInstruction.duration_seconds into a
     # frame count when instruction.fps is unset. VERIFIED (Sprint 4
     # Prompt 4): the supplied, experimentally-validated wan22_i2v_5b.json
     # workflow's own node 57 (CreateVideo) has fps=24 — this is no
     # longer a placeholder guess, it's read directly from that node.
-    comfyui_default_fps: int = 24
+    # 8, not 24: Sprint 4 Prompt 8 supplied a newer, live-validated
+    # RunPod RTX 4090 run (both T2V and I2V) using this value,
+    # superseding Prompt 4's earlier 24fps/49-frame proof. Both are
+    # genuinely real, live-validated data points from different
+    # sessions -- this is not a guess reconciling them, it's simply
+    # taking the most recent one as the new default, per that task's
+    # own explicit instruction to preserve its settings as the
+    # baseline "unless there is a strong reason not to."
+    comfyui_default_fps: int = 8
 
     # --- ComfyUI / FLUX image provider (Sprint 4 Prompt 5) ---
     # Reuses comfyui_base_url / comfyui_timeout_seconds above rather

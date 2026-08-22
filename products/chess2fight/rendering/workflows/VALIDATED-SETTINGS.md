@@ -37,30 +37,85 @@ UI-export companion file
 ComfyUI subgraphs; the API-format file used by the provider is the
 distilled one, confirmed by its CFG=1/steps=4 values matching exactly.
 
-## Wan 2.2 TI2V 5B — image-to-video
+## Runtime vs. reference workflow files
+
+Only two files under `products/chess2fight/rendering/workflows/` are
+ever loaded at runtime — `wan22_i2v_5b.json` and `wan22_t2v_5b.json`
+(both API-format, referenced by `settings.comfyui_workflow_path` /
+`.comfyui_t2v_workflow_path`), plus `flux2_klein_t2i_4b.json` for the
+image provider. Every `*.ui_export.json` file (the regular "Save"
+format, with node positions/UI metadata/subgraphs) is reference/debug
+material only — useful for opening in ComfyUI's editor to inspect or
+modify visually, never read by any provider. No setting points at a
+`.ui_export.json` path; this is enforced by construction, not by a
+runtime check.
+
+## Wan 2.2 TI2V 5B — image-to-video (I2V, primary mode)
 
 | Setting | Value |
 |---|---|
 | Diffusion model | `wan2.2_ti2v_5B_fp16.safetensors` |
 | Text encoder | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` |
 | VAE | `wan2.2_vae.safetensors` |
-| Resolution | 640 × 352 |
-| Frames | 49 (≈2.04s at 24fps) |
-| FPS | 24 |
-| Steps | 20 |
+| Resolution | 832 × 480 |
+| Frames | 17 (≈2.125s at 8fps) |
+| FPS | 8 |
+| Steps | 8 |
 | CFG | 5 |
 | Sampler | uni_pc |
 | Scheduler | simple |
 | Denoise | 1 |
 | Workflow file | `products/chess2fight/rendering/workflows/wan22_i2v_5b.json` |
 
-The workflow file was updated in this task to the version actually used
-in the validated FLUX→Wan run (the `LoadImage` node's default value
-references the real generated keyframe filename from that run,
-`halisako_flux2_keyframe_proof_01.png.png` — this default is always
-overwritten by the provider's own upload step before submission, never
-read as-is; it's meaningful only as evidence of what was actually run,
-not as a required input filename).
+**Sprint 4 Prompt 8 superseded these values** — a newer live validation
+on a RunPod RTX 4090 host used 832×480/8fps/17 frames/8 steps, differing
+from Prompt 4's earlier 640×352/24fps/49-frame/20-step proof. Both are
+genuine, live-validated data points from different sessions; this
+backend uses the more recent one as its default. `settings.comfyui_default_fps`
+is `8`, not `24`.
+
+The workflow file was updated to the version actually used in a live
+FLUX→Wan run (the `LoadImage` node's default value references the real
+generated keyframe filename from that run — always overwritten by the
+provider's own upload step before submission, never read as-is).
+
+**A discrepancy worth recording plainly**: the artifacts supplied for
+Prompt 8 labeled one file "the I2V API-format workflow... the most
+important artifact," and another as merely useful for "understanding
+the working node structure" of "the small Wan 2.2 test." The actual
+JSON structure showed the reverse — the file called "the I2V workflow"
+has no `LoadImage` node and no `start_image` wiring at all (structurally
+text-to-video); the file described as a small test has the real,
+wired image-conditioning connection (structurally image-to-video).
+`wan22_i2v_5b.json` and `wan22_t2v_5b.json` were built from the
+structurally-correct files, not the labels — see
+`core/animation_providers/comfyui.py`'s module docstring for the full
+account.
+
+## Wan 2.2 TI2V 5B — text-to-video (T2V, secondary mode)
+
+| Setting | Value |
+|---|---|
+| Diffusion model | `wan2.2_ti2v_5B_fp16.safetensors` (same as I2V) |
+| Text encoder | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (same as I2V) |
+| VAE | `wan2.2_vae.safetensors` (same as I2V) |
+| Resolution | 832 × 480 |
+| Frames | 17 |
+| FPS | 8 |
+| Steps | 8 |
+| CFG | 5 |
+| Workflow file | `products/chess2fight/rendering/workflows/wan22_t2v_5b.json` |
+
+Set `AnimationInstruction.animation_type = AnimationType.TEXT_TO_VIDEO`
+and omit `source_image_path` to use this mode.
+`ComfyUIAnimationProvider` selects between the I2V and T2V workflow
+files automatically based on this field — no separate provider class,
+no separate router registration. `MockAnimationProvider` does not
+support T2V (it has no image to hold static) and returns a clear
+failure if given a text-to-video instruction; Chess2Fight's own
+production pipeline (`AnimationPipeline`) always uses I2V, since it
+always renders a still frame first — T2V exists for direct/standalone
+provider use.
 
 ## Provider selection
 
@@ -86,6 +141,66 @@ ComfyUI server with the respective models installed:
 COMFYUI_LIVE_TEST=1 pytest tests/test_comfyui_live_integration.py -v -s
 COMFYUI_IMAGE_LIVE_TEST=1 pytest tests/test_comfyui_image_live_integration.py -v -s
 ```
+
+`COMFYUI_LIVE_TEST=1` now exercises both animation modes in one run —
+I2V (against `wan22_i2v_5b.json`) and T2V (against `wan22_t2v_5b.json`),
+added Sprint 4 Prompt 8.
+
+## Standalone ComfyUI provider smoke test (Sprint 4 Prompt 9)
+
+Before running the gated pytest above, or the full Chess2Fight
+single-shot path below, this is the narrowest possible real check —
+it exercises only `ComfyUIAnimationProvider` directly, with a
+manually-supplied image and prompt, no PGN or chess analysis involved
+at all.
+
+### Required model files and directories
+
+ComfyUI must have these three files already installed in the
+directories shown (paths are ComfyUI's own standard model layout):
+
+```
+ComfyUI/
+├── models/
+│   ├── diffusion_models/
+│   │   └── wan2.2_ti2v_5B_fp16.safetensors
+│   ├── text_encoders/
+│   │   └── umt5_xxl_fp8_e4m3fn_scaled.safetensors
+│   └── vae/
+│       └── wan2.2_vae.safetensors
+```
+
+This document does not include, link to, or bundle any model binary —
+only the filenames and expected directories above.
+
+### Exact command
+
+```bash
+python scripts/comfyui_single_shot_smoke.py \
+    --base-url http://<comfyui-host>:8188 \
+    --image path/to/reference.png \
+    --prompt "Cinematic battle animation. The character comes alive and moves forward with controlled aggressive motion."
+```
+
+Defaults to the validated baseline if not overridden: 832×480, 8fps,
+17 frames (≈2.125s), steps=8, CFG=5, sampler=uni_pc — printed explicitly
+before submission, along with the resolved prompt/job ID once queued.
+
+### What constitutes success
+
+The script itself prints `SUCCESS` and exits `0` only if all of the
+following actually happened — never fabricated:
+
+1. the local image was found and uploaded to ComfyUI;
+2. the mutated workflow was accepted (`/prompt` didn't return
+   `node_errors`);
+3. polling `/history/{prompt_id}` reached a non-error completed state;
+4. the resulting video was located and downloaded from ComfyUI;
+5. the downloaded file passed local verification (exists, non-empty,
+   `ffprobe`-readable, valid duration/dimensions).
+
+Any failure at any step prints the real error message to stderr and
+exits `1` — no fallback file, no partial success.
 
 ## Single-shot acceptance path (Sprint 4 Prompt 7)
 
