@@ -254,7 +254,7 @@ def test_t2v_injection_does_not_mutate_the_loaded_workflow():
 # --- Full mocked T2V generation flow: no upload call, real MP4 out ---------
 
 
-def test_full_t2v_generation_flow_produces_a_real_valid_mp4(tmp_path, monkeypatch):
+def test_full_mocked_t2v_generation_flow_produces_a_structurally_valid_mp4(tmp_path, monkeypatch):
     video_bytes = _make_real_mp4(tmp_path)
     provider = _provider(tmp_path)
     transport = _MockTransport(_t2v_success_handlers(video_bytes))

@@ -529,7 +529,7 @@ def test_result_metadata_contains_correct_artifact_information(tmp_path, monkeyp
     assert result.metadata["text_encoder"] == "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 
 
-def test_result_duration_width_height_come_from_actual_probed_video(tmp_path, monkeypatch):
+def test_result_duration_width_height_come_from_mocked_but_ffprobe_verified_video(tmp_path, monkeypatch):
     """The result must reflect the REAL downloaded file's properties
     (via ffprobe), not just echo back the request."""
     video_bytes = _make_real_mp4(tmp_path, width=640, height=352, duration=2.0416667)

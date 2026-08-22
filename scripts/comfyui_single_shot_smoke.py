@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -108,6 +109,28 @@ def _parse_args() -> argparse.Namespace:
 async def _main() -> int:
     args = _parse_args()
     settings = get_settings()
+
+    # Preflight, before anything else — including before validating
+    # --image: ComfyUIAnimationProvider verifies every downloaded video
+    # with a local `ffprobe` call *after* the full upload/queue/poll/
+    # download sequence completes (see _verify_video in
+    # core/animation_providers/comfyui.py). Without ffprobe available
+    # on whatever machine runs this script, a full, paid GPU generation
+    # would succeed remotely and only then fail at this last, purely
+    # local step — a wasteful, avoidable failure mode this check exists
+    # specifically to prevent. This does not check the remote ComfyUI
+    # server's own ffmpeg (a separate, server-side requirement already
+    # implied by its CreateVideo/SaveVideo nodes working at all).
+    if shutil.which("ffprobe") is None:
+        print(
+            "ERROR: ffprobe was not found on PATH on this machine. ComfyUIAnimationProvider "
+            "verifies every downloaded video with ffprobe after generation completes — without "
+            "it, a full (paid, GPU-time-consuming) remote generation would succeed and then fail "
+            "at this final local verification step. Install ffmpeg (which bundles ffprobe) here "
+            "before running this script against a real ComfyUI server.",
+            file=sys.stderr,
+        )
+        return 1
 
     image_path = Path(args.image)
     if not image_path.exists():

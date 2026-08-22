@@ -115,6 +115,39 @@ def test_missing_image_fails_fast_with_no_network_call(tmp_path, monkeypatch, ca
     assert "not found" in capsys.readouterr().err.lower()
 
 
+def test_missing_ffprobe_fails_fast_before_any_network_call(tmp_path, monkeypatch, capsys):
+    """Regression test for the preflight check added during the final
+    pre-GPU audit: without ffprobe, a full paid GPU generation could
+    succeed remotely and only then fail at the final local
+    verification step — this check exists to catch that before any
+    network call is ever made, not just before wasting GPU time."""
+    monkeypatch.setattr(smoke.shutil, "which", lambda name: None)
+    image_path = _make_reference_image(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["comfyui_single_shot_smoke.py", "--base-url", "http://fake-comfyui:8188",
+         "--image", image_path, "--prompt", "test"],
+    )
+    exit_code = asyncio.run(smoke._main())
+    stderr = capsys.readouterr().err
+    assert exit_code == 1
+    assert "ffprobe" in stderr.lower()
+    assert "not found" in stderr.lower()
+
+
+def test_ffprobe_present_allows_normal_progress_past_preflight(tmp_path, monkeypatch, capsys):
+    """The inverse check: when ffprobe genuinely is available (the
+    normal case, verified via the real shutil.which — not mocked),
+    the preflight must not block progress to the actual image-missing
+    check below it."""
+    image_path = str(tmp_path / "does_not_exist.png")
+    monkeypatch.setattr(sys, "argv", ["comfyui_single_shot_smoke.py", "--image", image_path, "--prompt", "test"])
+    exit_code = asyncio.run(smoke._main())
+    stderr = capsys.readouterr().err
+    assert exit_code == 1
+    assert "image not found" in stderr.lower()  # reached the image check, not stuck at ffprobe preflight
+
+
 def test_resolved_defaults_match_the_validated_baseline(tmp_path, monkeypatch, capsys):
     """Confirms the script's own default resolution logic — 832x480,
     8fps, 17 frames — without needing a real server: this only
