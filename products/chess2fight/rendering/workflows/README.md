@@ -1,5 +1,15 @@
 # Wan 2.2 TI2V-5B ComfyUI workflow
 
+> **PARTIALLY SUPERSEDED (Sprint 4 Prompt 8, corrected Prompt 10):** the
+> `wan22_i2v_5b.json` file in this directory was replaced in Sprint 4
+> Prompt 8 with a newer, separately-validated RunPod RTX 4090 run —
+> 832×480, 8fps, 17 frames, 8 steps — superseding the 640×352/24fps/
+> 49-frame values this document originally described. See
+> `VALIDATED-SETTINGS.md` for the current values. The node map below
+> (which nodes exist and what each is for) is still accurate — only
+> the specific numbers, and the fps row's own claim, were stale; both
+> are corrected inline below rather than rewriting this whole document.
+
 `wan22_i2v_5b.json` in this directory is the **experimentally-validated**
 ComfyUI API-format workflow for Wan 2.2 TI2V-5B image-to-video generation.
 It was supplied (not authored or guessed) as part of Sprint 4 Prompt 4,
@@ -11,7 +21,9 @@ NVIDIA RTX 4090, 24 GB VRAM, CUDA 12.8, PyTorch 2.10.0+cu128
 
 producing a real 640x352, 24fps, 49-frame (2.04s) MP4 with five distinct
 sampled-frame hashes -- confirmed genuine generated motion, not a static
-frame repeated.
+frame repeated. **(That specific run is now historical — see the notice
+above; the file at `wan22_i2v_5b.json` itself no longer matches these
+exact numbers.)**
 
 This supersedes Prompt 3's version of this README, which explained why
 *no* workflow file existed yet. That gap is now closed for the workflow
@@ -37,7 +49,7 @@ wan2.2_vae.safetensors                 (VAE, node 39)
 | 7       | `CLIPTextEncode`           | Negative prompt                     | `negative_prompt`, **only if provided** -- see below          |
 | 3       | `KSampler`                 | Seed                                 | `seed`, or a deterministic fallback derived from `prompt`      |
 | 55      | `Wan22ImageToVideoLatent`  | Width / height / frame length        | `width`, `height` (normalized), `duration_seconds` -> frames    |
-| 57      | `CreateVideo`              | FPS (fixed at 24 in this workflow)   | not injected -- this workflow's own verified 24fps applies      |
+| 57      | `CreateVideo`              | FPS (currently 8 in the active workflow, see VALIDATED-SETTINGS.md) | **is** injected — `instruction.fps` or `settings.comfyui_default_fps` (Sprint 4 Prompt 6 fix; this row previously said "not injected," which stopped being true once that fix landed) |
 | 58      | `SaveVideo`                | Output node                          | not injected -- read from, not written to                       |
 
 Nodes 37/38/39 (model/VAE/text-encoder loaders) and node 48

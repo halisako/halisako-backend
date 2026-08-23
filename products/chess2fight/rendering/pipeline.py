@@ -70,7 +70,13 @@ class RenderVideoRequest(BaseModel):
     preferences: BattlePreferences | None = Field(
         default=None, description="Optional structured preferences, same as GenerateRequest."
     )
-    fps: int = Field(default=24, gt=0, description="Output video frame rate.")
+    fps: int = Field(
+        default_factory=lambda: get_settings().comfyui_default_fps,
+        gt=0,
+        description="Output video frame rate. Defaults to the current Wan-validated policy "
+        "(settings.comfyui_default_fps, currently 8) — not a hardcoded value that could drift "
+        "out of sync with it, as a prior literal default of 24 did (Sprint 4 Prompt 10.1).",
+    )
     width: int = Field(
         default_factory=lambda: get_settings().comfyui_animation_default_width,
         gt=0,
@@ -149,7 +155,7 @@ class FightVideoPipeline:
         self,
         pgn: str,
         preferences: BattlePreferences,
-        fps: int = 24,
+        fps: int | None = None,
         width: int | None = None,
         height: int | None = None,
         frame_duration_seconds: float = 2.0,
@@ -161,15 +167,25 @@ class FightVideoPipeline:
             pgn: PGN text of the game to render.
             preferences: Style/battle-mode preferences, exactly as the
                 existing `/generate` route already accepts.
-            fps: Output video frame rate.
+            fps: Output video frame rate. Defaults to
+                `settings.comfyui_default_fps` (currently 8) — the
+                current Wan-validated policy — when not given. A prior
+                literal default of 24 here (and on `RenderVideoRequest`)
+                had silently drifted out of sync with that setting once
+                it changed from 24 to 8 (Sprint 4 Prompt 8); fixed to
+                resolve from the setting directly, Sprint 4 Prompt 10.1.
             width: Output video (animation) width, in pixels. Defaults
                 to `settings.comfyui_animation_default_width` (832) —
                 the Wan-validated resolution — not a generic value, so
-                this never silently resolves to 1024x1024. Only
-                affects the animation/video-assembly steps; the still
-                reference image RenderPipeline generates is unaffected
-                either way (it's never passed width/height here at
-                all — see `RenderPipeline.render()`'s own call below).
+                this never silently resolves to 1024x1024. This is
+                distinct from the FLUX reference-image resolution
+                below: the two are independently resolved and passed
+                to different steps. (Sprint 4 Prompt 10.1: an earlier
+                version of this docstring said the reference image was
+                "unaffected either way" and "never passed width/height
+                here at all" — true before Sprint 4 Prompt 10's own
+                fix, no longer true now that `render()` below is
+                explicitly passed the FLUX policy; corrected here.)
             height: Output video (animation) height, in pixels.
                 Defaults to `settings.comfyui_animation_default_height`
                 (480).
@@ -193,8 +209,20 @@ class FightVideoPipeline:
             rendered frame's metadata, and the shot-by-shot timeline.
         """
         settings = get_settings()
-        resolved_width = width if width is not None else settings.comfyui_animation_default_width
-        resolved_height = height if height is not None else settings.comfyui_animation_default_height
+        resolved_fps = fps if fps is not None else settings.comfyui_default_fps
+        resolved_animation_width = width if width is not None else settings.comfyui_animation_default_width
+        resolved_animation_height = height if height is not None else settings.comfyui_animation_default_height
+        # Sprint 4 Prompt 10: the FLUX/Chess2Fight image-generation policy
+        # (settings.comfyui_image_default_width/height, 1280x704) was
+        # defined in config but never actually reached RenderPipeline —
+        # generate_image() was called with only a prompt, silently using
+        # ImageProvider's own generic 1024x1024 default instead. Resolved
+        # here, at this Chess2Fight-specific call site, and passed through
+        # explicitly — RenderPipeline itself stays provider-agnostic (see
+        # its own docstring on why `None` there means "use the generic
+        # default", not "use FLUX's").
+        resolved_image_width = settings.comfyui_image_default_width
+        resolved_image_height = settings.comfyui_image_default_height
 
         resolved_fight_id = fight_id or uuid.uuid4().hex
 
@@ -205,13 +233,14 @@ class FightVideoPipeline:
         )
 
         render_output = await self._render_pipeline.render(
-            generate_response.prompted_timeline, resolved_fight_id
+            generate_response.prompted_timeline, resolved_fight_id,
+            width=resolved_image_width, height=resolved_image_height,
         )
         logger.info("Fight %s: rendered %d reference frames.", resolved_fight_id, render_output.frame_count)
 
         animation_output = await self._animation_pipeline.animate(
             render_output, generate_response.prompted_timeline,
-            width=resolved_width, height=resolved_height, fps=fps,
+            width=resolved_animation_width, height=resolved_animation_height, fps=resolved_fps,
         )
         logger.info("Fight %s: animated %d shot clips.", resolved_fight_id, animation_output.shot_count)
 
@@ -223,9 +252,9 @@ class FightVideoPipeline:
             clip_paths=clip_paths,
             output_path=video_path,
             total_duration_seconds=total_duration_seconds,
-            fps=fps,
-            width=resolved_width,
-            height=resolved_height,
+            fps=resolved_fps,
+            width=resolved_animation_width,
+            height=resolved_animation_height,
         )
         logger.info(
             "Fight %s: video assembled at %s (%.1fs, %d shot clips).",

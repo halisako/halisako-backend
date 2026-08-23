@@ -202,6 +202,19 @@ following actually happened — never fabricated:
 Any failure at any step prints the real error message to stderr and
 exits `1` — no fallback file, no partial success.
 
+## Expected ComfyUI job count for one acceptance run (Sprint 4 Prompt 10.1)
+
+Selecting exactly one cinematic shot causes **two** ComfyUI generation
+jobs, not one:
+
+1. one FLUX `/prompt` submission (the reference keyframe, 1280×704), and
+2. one Wan `/prompt` submission (the animation, 832×480).
+
+"Exactly one Wan `/prompt` submission" is the correct statement about
+the animation step specifically. "Exactly one `/prompt` submission
+total" would be wrong — it would incorrectly suggest FLUX generation
+doesn't count, or didn't happen.
+
 ## Single-shot acceptance path (Sprint 4 Prompt 7)
 
 Before attempting a full render, prove the real Chess2Fight rendering
@@ -230,11 +243,12 @@ game, renders its real `image_prompt` through the validated FLUX
 workflow, and animates the result through the validated Wan workflow —
 printing both the resulting image and video paths on success.
 
-### Low-cost GPU smoke test (Sprint 4 Prompt 7.1)
+### Low-cost GPU smoke test (Sprint 4 Prompt 7.1, values updated Prompt 10)
 
 Before spending GPU time on a shot's full real duration (shot 0's real
-duration is 7.75s → 185 Wan frames), first prove the FLUX → Wan handoff
-works with a capped, low-cost animation duration:
+duration is 7.75s → 61 Wan frames at the current 8fps default), first
+prove the FLUX → Wan handoff works with a capped, low-cost animation
+duration:
 
 ```bash
 export IMAGE_PROVIDER=comfyui
@@ -248,11 +262,17 @@ python scripts/render_single_shot.py \
 ```
 
 This uses the real shot's real `image_prompt` (unmodified), generates
-a real FLUX keyframe, and animates it for a capped ~2.0s (49 frames at
-24fps — the exact frame count already proven on the RTX 4090) instead
-of the shot's full real duration. `--max-animation-seconds` never
-changes the shot's own real cinematic duration — only the duration
-used for the animation step in this one acceptance run.
+a real FLUX keyframe (1280×704 — `settings.comfyui_image_default_width`
+/`.height`, independent of the animation resolution below), and
+animates it for a capped ~2 seconds — resolving to exactly **17
+frames at 8fps (2.125s effective duration)**, the current validated
+Wan baseline, at 832×480. `--max-animation-seconds` never changes the
+shot's own real cinematic duration — only the duration used for the
+animation step in this one acceptance run. (An earlier version of this
+document, written before Sprint 4 Prompt 8's live validation changed
+the default from 24fps to 8fps, said "49 frames at 24fps" here — that
+was this feature's original, now-superseded reference point, not a
+claim about the current default.)
 
 Once that succeeds, run the subsequent full-duration command (no cap):
 
@@ -263,7 +283,8 @@ python scripts/render_single_shot.py \
 ```
 
 This requests the shot's full real duration — approximately 7.75
-seconds, 185 frames at 24fps.
+seconds, resolving to 61 frames at the current 8fps default (not the
+185 frames a stale 24fps assumption would have suggested).
 
 ### Windows portability note
 

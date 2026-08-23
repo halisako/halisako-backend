@@ -41,10 +41,12 @@ own path *is* the result.
 
 Sprint 4 Prompt 7.1 added `max_animation_seconds` — an acceptance-only
 cap on the duration passed to the animation step, so a low-cost GPU
-smoke test (e.g. a real 49-frame Wan clip at 24fps/2s) can run before
-spending GPU time animating a shot's full real duration (which can run
-well past 100+ frames). The real `PromptedShot.duration_seconds` this
-cap is applied against is never mutated — `prepare()` computes a
+smoke test (e.g. a real 17-frame Wan clip at 8fps/~2.125s — the
+current validated Wan baseline, Sprint 4 Prompt 8/10; a 49-frame/24fps
+clip was this feature's original reference point before that baseline
+changed) can run before spending GPU time animating a shot's full real
+duration (which can run well past 60+ frames at the current 8fps
+default). The real `PromptedShot.duration_seconds` this cap is applied against is never mutated — `prepare()` computes a
 separate `effective_animation_duration_seconds` field, and `execute()`
 builds a non-mutating `model_copy()` of the shot (new object, original
 untouched) only when a cap actually changes the duration used; when no
@@ -260,18 +262,21 @@ class SingleShotAcceptanceRunner:
 
         Args:
             plan: A plan from `prepare()`.
-            width: Output width for the animated clip. Defaults to
+            width: Output width for the animated clip only. Defaults to
                 `settings.comfyui_animation_default_width` (832) — the
-                Wan-validated resolution (Sprint 4 Prompt 8/9), not a
-                generic value. Note this affects only the animation
-                step: `RenderPipeline.render()` below is never passed
-                width/height at all, so the still reference image's
-                resolution is whatever the configured ImageProvider
-                itself defaults to, independent of this parameter. An
-                earlier version of this docstring claimed this also
-                controlled "the reference image," which the code never
-                actually did — corrected here, not just the default
-                value.
+                Wan-validated resolution. The still reference image's
+                resolution is a separate, independently-resolved policy
+                (`settings.comfyui_image_default_width`, 1280 — FLUX's
+                own validated value) — passed explicitly to
+                `RenderPipeline.render()` below, unconditionally, not
+                controlled by this parameter at all. (Sprint 4 Prompt
+                10: earlier versions of this docstring claimed the
+                reference image's resolution was simply "whatever the
+                configured ImageProvider defaults to" — true at the
+                time, since nothing resolved a FLUX-specific policy
+                yet; no longer accurate now that one exists.)
+                Overriding `width` here only ever affects the Wan
+                animation step.
             height: Output height for the animated clip. Defaults to
                 `settings.comfyui_animation_default_height` (480).
 
@@ -280,11 +285,19 @@ class SingleShotAcceptanceRunner:
             video paths.
         """
         settings = get_settings()
-        resolved_width = width if width is not None else settings.comfyui_animation_default_width
-        resolved_height = height if height is not None else settings.comfyui_animation_default_height
+        resolved_animation_width = width if width is not None else settings.comfyui_animation_default_width
+        resolved_animation_height = height if height is not None else settings.comfyui_animation_default_height
+        # Sprint 4 Prompt 10: same FLUX image-resolution policy as
+        # FightVideoPipeline.run() — resolved here, passed through
+        # explicitly, so acceptance exercises the identical policy
+        # production uses, not a special path that happens to differ.
+        resolved_image_width = settings.comfyui_image_default_width
+        resolved_image_height = settings.comfyui_image_default_height
 
         render_timeline = self._build_single_shot_timeline(plan, plan.shot)
-        render_output = await self._render_pipeline.render(render_timeline, plan.fight_id)
+        render_output = await self._render_pipeline.render(
+            render_timeline, plan.fight_id, width=resolved_image_width, height=resolved_image_height,
+        )
 
         if plan.effective_animation_duration_seconds == plan.shot.duration_seconds:
             # No cap requested (or the requested cap wasn't below the
@@ -304,7 +317,7 @@ class SingleShotAcceptanceRunner:
             animation_timeline = self._build_single_shot_timeline(plan, animation_shot)
 
         animation_output = await self._animation_pipeline.animate(
-            render_output, animation_timeline, width=resolved_width, height=resolved_height, fps=plan.fps,
+            render_output, animation_timeline, width=resolved_animation_width, height=resolved_animation_height, fps=plan.fps,
         )
 
         # Exactly one shot in, exactly one animated clip out — asserted,

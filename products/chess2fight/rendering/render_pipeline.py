@@ -82,7 +82,9 @@ class RenderPipeline:
         self._image_router = image_router or get_image_router()
         self._asset_manager = asset_manager or AssetManager()
 
-    async def render(self, timeline: PromptedTimeline, fight_id: str) -> RenderOutput:
+    async def render(
+        self, timeline: PromptedTimeline, fight_id: str, width: int | None = None, height: int | None = None,
+    ) -> RenderOutput:
         """Renders every shot in `timeline` to a frame on disk.
 
         Args:
@@ -94,13 +96,28 @@ class RenderPipeline:
                 engineering notes for why: nothing upstream in this
                 pipeline currently carries a persistent fight/battle
                 identifier for this module to reuse.
+            width: Output image width, in pixels. Sprint 4 Prompt 10:
+                left `None` by default — this generic, provider-
+                agnostic pipeline has no opinion on resolution and
+                doesn't hard-code any provider-specific policy (e.g.
+                FLUX's own validated 1280x704); when `None`,
+                `ImageRouter.generate_image()`'s own generic default
+                (1024x1024) applies, exactly as before this parameter
+                existed. A Chess2Fight-specific caller that wants a
+                particular provider's validated resolution (FLUX,
+                say) should resolve that policy itself and pass it
+                here explicitly — see FightVideoPipeline.run() and
+                SingleShotAcceptanceRunner.execute(), which now both
+                do exactly that from the same settings values.
+            height: Output image height, in pixels. Same `None`-means-
+                generic-default reasoning as `width`.
 
         Returns:
             A RenderOutput describing every frame written and where
             the fight's metadata.json ended up.
         """
         rendered_frames = [
-            await self._render_one_shot(shot, fight_id) for shot in timeline.shots
+            await self._render_one_shot(shot, fight_id, width, height) for shot in timeline.shots
         ]
 
         manifest = RenderManifest(
@@ -118,12 +135,19 @@ class RenderPipeline:
             manifest_path=str(manifest_path),
         )
 
-    async def _render_one_shot(self, shot: PromptedShot, fight_id: str) -> RenderedFrame:
+    async def _render_one_shot(
+        self, shot: PromptedShot, fight_id: str, width: int | None = None, height: int | None = None,
+    ) -> RenderedFrame:
         """Renders a single shot: generate via ImageRouter, save via
         AssetManager, build its metadata record."""
         frame_number = shot.sequence_order
 
-        result = await self._image_router.generate_image(shot.image_prompt)
+        image_kwargs = {}
+        if width is not None:
+            image_kwargs["width"] = width
+        if height is not None:
+            image_kwargs["height"] = height
+        result = await self._image_router.generate_image(shot.image_prompt, **image_kwargs)
         saved_path = self._asset_manager.save_frame(fight_id, frame_number, result.image_path)
 
         metadata = FrameMetadata(
