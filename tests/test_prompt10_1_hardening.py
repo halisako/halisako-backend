@@ -22,6 +22,7 @@ import asyncio
 import httpx
 
 from core.config import get_settings
+from products.chess2fight.rendering import acceptance_preflight as preflight_module
 from scripts import render_single_shot as script
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient  # captured once, before any test can monkeypatch it
@@ -29,7 +30,7 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient  # captured once, before any test can mon
 
 def _patch_client(monkeypatch, transport: httpx.AsyncBaseTransport) -> None:
     monkeypatch.setattr(
-        script.httpx, "AsyncClient",
+        preflight_module.httpx, "AsyncClient",
         lambda *a, **kw: _REAL_ASYNC_CLIENT(*a, **{**kw, "transport": transport}),
     )
 
@@ -85,7 +86,7 @@ def test_confirmed_missing_flux_diffusion_model_is_a_hard_problem(monkeypatch):
     )
     _patch_client(monkeypatch, _MockTransport(handlers))
 
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert any("flux-2-klein-4b.safetensors" in p for p in problems)
     assert warnings == []
 
@@ -101,7 +102,7 @@ def test_confirmed_missing_wan_diffusion_model_is_a_hard_problem(monkeypatch):
     )
     _patch_client(monkeypatch, _MockTransport(handlers))
 
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert any("wan2.2_ti2v_5B_fp16.safetensors" in p for p in problems)
     assert warnings == []
 
@@ -117,7 +118,7 @@ def test_confirmed_missing_text_encoder_is_a_hard_problem(monkeypatch):
     )
     _patch_client(monkeypatch, _MockTransport(handlers))
 
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert any("qwen_3_4b.safetensors" in p for p in problems)
     assert warnings == []
 
@@ -133,7 +134,7 @@ def test_confirmed_missing_vae_is_a_hard_problem(monkeypatch):
     )
     _patch_client(monkeypatch, _MockTransport(handlers))
 
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert any("wan2.2_vae.safetensors" in p for p in problems)
     assert warnings == []
 
@@ -150,7 +151,7 @@ def test_malformed_object_info_produces_warning_not_false_confirmed_missing(monk
     handlers["GET /object_info/UNETLoader"] = lambda r: httpx.Response(200, json={"totally": "unexpected shape"})
     _patch_client(monkeypatch, _MockTransport(handlers))
 
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert problems == []
     assert any("could not verify" in w.lower() for w in warnings)
 
@@ -168,7 +169,7 @@ def test_object_info_with_no_recognizable_combo_field_is_a_warning(monkeypatch):
     )
     _patch_client(monkeypatch, _MockTransport(handlers))
 
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert problems == []
     assert any("could not verify" in w.lower() for w in warnings)
 
@@ -179,7 +180,7 @@ def test_all_models_present_produces_no_problems_and_no_warnings(monkeypatch):
     monkeypatch.setattr(settings, "animation_provider", "comfyui")
     _patch_client(monkeypatch, _MockTransport(_handlers_with_all_models_present()))
 
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert problems == []
     assert warnings == []
 

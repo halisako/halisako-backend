@@ -240,28 +240,28 @@ def test_single_shot_acceptance_and_full_pipeline_use_the_same_image_policy(tmp_
 
 
 def test_preflight_is_a_complete_noop_for_mock(monkeypatch):
-    from scripts import render_single_shot as script
+    from products.chess2fight.rendering import acceptance_preflight as preflight_module
 
     settings = get_settings()
     monkeypatch.setattr(settings, "image_provider", "mock")
     monkeypatch.setattr(settings, "animation_provider", "mock")
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert problems == []
     assert warnings == []
 
 
 def test_preflight_fails_on_unreachable_comfyui(monkeypatch):
-    from scripts import render_single_shot as script
+    from products.chess2fight.rendering import acceptance_preflight as preflight_module
 
     settings = get_settings()
     monkeypatch.setattr(settings, "image_provider", "comfyui")
     monkeypatch.setattr(settings, "comfyui_base_url", "http://this-host-does-not-exist.invalid:1")
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert any("not reachable" in p.lower() for p in problems)
 
 
 def test_preflight_fails_on_missing_workflow_file(monkeypatch, tmp_path):
-    from scripts import render_single_shot as script
+    from products.chess2fight.rendering import acceptance_preflight as preflight_module
 
     settings = get_settings()
     monkeypatch.setattr(settings, "animation_provider", "comfyui")
@@ -273,20 +273,20 @@ def test_preflight_fails_on_missing_workflow_file(monkeypatch, tmp_path):
 
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
-        script.httpx, "AsyncClient",
+        preflight_module.httpx, "AsyncClient",
         lambda *a, **kw: real_client(*a, **{**kw, "transport": _MockTransport()}),
     )
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert any("workflow file not found" in p.lower() for p in problems)
 
 
 def test_preflight_never_blocks_generation_that_never_gets_attempted_when_ffprobe_missing(monkeypatch):
-    from scripts import render_single_shot as script
+    from products.chess2fight.rendering import acceptance_preflight as preflight_module
 
     settings = get_settings()
     monkeypatch.setattr(settings, "animation_provider", "comfyui")
-    monkeypatch.setattr(script.shutil, "which", lambda name: None)
-    problems, warnings = asyncio.run(script._preflight_check(settings))
+    monkeypatch.setattr(preflight_module.shutil, "which", lambda name: None)
+    problems, warnings = asyncio.run(preflight_module.preflight_check(settings))
     assert any("ffprobe" in p.lower() for p in problems)
     assert any("ffmpeg" in p.lower() for p in problems)
 

@@ -9,6 +9,29 @@ access itself — see `core/animation_providers/comfyui.py`'s own
 environment audit for that — so everything below reflects the supplied,
 externally-validated artifacts, not anything run in this environment.
 
+## Live milestone status (Sprint 4 Prompt 11)
+
+**PROVEN LIVE** — real RTX 4090, real ComfyUI history inspected directly:
+
+- Single-shot Chess2Fight: 1 FLUX job + 1 Wan job, real end-to-end
+  success. `products/chess2fight/rendering/single_shot_acceptance.py`
+  via `scripts/render_single_shot.py`.
+
+**NOT YET PROVEN LIVE**:
+
+- Three-shot Chess2Fight: 3 FLUX jobs + 3 Wan jobs + local
+  concatenation into one final MP4.
+  `products/chess2fight/rendering/multi_shot_acceptance.py` via
+  `scripts/render_multi_shot_acceptance.py`. Built and thoroughly
+  tested against mock providers (see `tests/test_multi_shot_acceptance.py`);
+  the gated live test
+  (`tests/test_multi_shot_live_acceptance.py`,
+  `COMFYUI_MULTI_SHOT_LIVE_TEST=1`) has not yet been run against a real
+  server. Do not treat this as GPU-proven until that gated test
+  actually passes on real hardware.
+- All 8 timeline shots / a complete fight render: not attempted, not
+  built.
+
 ## Validated environment
 
 | | |
@@ -307,3 +330,78 @@ pytest tests/test_single_shot_live_acceptance.py -v -s
 Ordinary `pytest tests/` never runs this — it requires the environment
 variable above and a real, reachable ComfyUI server with both
 validated model sets installed.
+
+
+## Three-shot (capped multi-shot) acceptance path (Sprint 4 Prompt 11)
+
+Generalizes the single-shot acceptance path above from exactly one
+shot to a capped range of shots — same production wiring
+(`RenderPipeline`, `AnimationPipeline`, `AnimationRouter`,
+`ImageRouter`), plus a final local `VideoBuilder.concatenate_clips()`
+step. Default and safety-capped at 3 shots — see
+`products/chess2fight/rendering/multi_shot_acceptance.py`'s own
+`ShotCountExceedsAcceptanceCapError` for why exceeding it requires an
+explicit `--allow-more-than-cap` flag, never a convenience default.
+
+### Generation count contract
+
+For 3 selected shots: **3 FLUX jobs + 3 Wan jobs = 6 ComfyUI generation
+jobs total**, plus exactly 1 local concatenation (never a 7th ComfyUI
+job) and 0 additional AI generation jobs of any kind. "Exactly one Wan
+`/prompt` submission" describes one shot; for the whole 3-shot run, the
+correct statement is "exactly 3 Wan `/prompt` submissions."
+
+### Dry run (no ComfyUI needed, works anywhere)
+
+```bash
+python scripts/render_multi_shot_acceptance.py --sample --dry-run --max-animation-seconds 2
+```
+
+### Exact first paid three-shot command
+
+```bash
+export IMAGE_PROVIDER=comfyui
+export ANIMATION_PROVIDER=comfyui
+export COMFYUI_BASE_URL=http://127.0.0.1:8188
+
+python scripts/render_multi_shot_acceptance.py \
+    --sample \
+    --start-shot-index 0 \
+    --shot-count 3 \
+    --max-animation-seconds 2
+```
+
+Selects real timeline shots 0, 1, 2 (never fabricated, never a
+different image_prompt), caps each shot's animation to ~2s (17 frames
+at the current 8fps default per shot — the same validated baseline as
+the single-shot path), renders 3 real FLUX keyframes at 1280x704,
+animates 3 real Wan clips at 832x480, and concatenates them via the
+real `VideoBuilder.concatenate_clips()` into one final MP4 — expected
+duration approximately 3 x 2.125s = 6.375s (before any
+container/encoding rounding on the real measured value). Writes
+`multi_shot_acceptance_manifest.json` (path configurable via
+`--manifest-path`) recording every shot's prompt, durations, frame
+count, and artifact paths, in timeline order.
+
+### Live acceptance test (same path, as a gated pytest)
+
+```bash
+COMFYUI_MULTI_SHOT_LIVE_TEST=1 \
+IMAGE_PROVIDER=comfyui ANIMATION_PROVIDER=comfyui \
+COMFYUI_BASE_URL=http://<your-comfyui-host>:8188 \
+pytest tests/test_multi_shot_live_acceptance.py -v -s
+```
+
+Ordinary `pytest tests/` never runs this. Do not run this — or the
+paid CLI command above — until the single-shot path (already
+GPU-proven) has been re-confirmed working on whatever host will run
+this; see "Cost control" below.
+
+### Cost control — do not run until three-shot acceptance passes
+
+Do not attempt: a `--shot-count` above 3 (even with the override
+flag), the full 8-shot timeline, uncapped per-shot animation duration,
+or a full `/render` fight — until the capped 3-shot command above
+succeeds and its evidence (6 ComfyUI history entries, 3 valid FLUX
+keyframes, 3 valid Wan clips, 1 valid concatenated MP4) has been
+manually reviewed.

@@ -31,7 +31,8 @@ Sprint 4 Prompt 10: real acceptance runs (image_provider=comfyui and/or
 animation_provider=comfyui) are preflighted before the first expensive
 generation call — ComfyUI reachability, local ffmpeg/ffprobe, configured
 workflow files, and (best-effort) whether the required model filenames
-are visible via ComfyUI's own /object_info API. See _preflight_check()
+are visible via ComfyUI's own /object_info API. See
+products/chess2fight/rendering/acceptance_preflight.py's preflight_check()
 below for exactly what's checked and why. Mock runs skip this entirely
 — there's nothing real to check. Use --skip-preflight to bypass (e.g.
 if a check here has a false positive) — never used automatically.
@@ -41,16 +42,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import shutil
 import sys
 from pathlib import Path
-
-import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.ai_router import get_ai_provider  # noqa: E402
 from core.config import get_settings  # noqa: E402
+from products.chess2fight.rendering.acceptance_preflight import preflight_check  # noqa: E402
 from products.chess2fight.rendering.single_shot_acceptance import (  # noqa: E402
     ShotIndexOutOfRangeError,
     SingleShotAcceptanceRunner,
@@ -128,137 +127,6 @@ def _resolve_pgn(args: argparse.Namespace) -> str:
     sys.exit(1)
 
 
-async def _preflight_check(settings) -> tuple[list[str], list[str]]:
-    """Checks obvious prerequisites for a REAL (comfyui) acceptance run
-    before the first expensive generation call.
-
-    Returns (problems, warnings): `problems` are hard failures the
-    caller should treat as blocking (exit before generation);
-    `warnings` are printed but don't block. For the /object_info
-    model-visibility check below, the two are deliberately distinct
-    (Sprint 4 Prompt 10.1): if /object_info for a node type is fetched
-    and parsed successfully and a required model genuinely isn't in
-    the list ComfyUI reports, that's a confirmed, actionable problem —
-    hard-blocked. If /object_info itself can't be fetched, or its
-    response can't be reliably parsed (its exact shape hasn't been
-    independently verified against a live server), that's genuine
-    uncertainty, not a confirmed absence — a warning, not a block. A
-    no-op (returns ([], [])) for a mock run — there's nothing real to
-    check.
-
-    Per this task's explicit constraints: never downloads models,
-    never silently falls back to mock, and lives here (a CLI-layer
-    concern) rather than inside RenderPipeline/AnimationPipeline/the
-    providers themselves — those stay ComfyUI-agnostic.
-    """
-    using_comfyui = settings.image_provider == "comfyui" or settings.animation_provider == "comfyui"
-    if not using_comfyui:
-        return [], []
-
-    problems: list[str] = []
-    warnings: list[str] = []
-
-    if shutil.which("ffprobe") is None:
-        problems.append(
-            "ffprobe not found on PATH — ComfyUIAnimationProvider verifies every downloaded "
-            "video with it after generation completes."
-        )
-    if shutil.which("ffmpeg") is None:
-        problems.append(
-            "ffmpeg not found on PATH — required by MockImageProvider/MockAnimationProvider "
-            "(used for whichever side of this run isn't routed through comfyui) and by VideoBuilder."
-        )
-
-    if settings.image_provider == "comfyui":
-        flux_workflow = Path(settings.comfyui_image_workflow_path)
-        if not flux_workflow.exists():
-            problems.append(f"FLUX workflow file not found: {flux_workflow}")
-    if settings.animation_provider == "comfyui":
-        wan_workflow = Path(settings.comfyui_workflow_path)
-        if not wan_workflow.exists():
-            problems.append(f"Wan I2V workflow file not found: {wan_workflow}")
-
-    base_url = settings.comfyui_base_url.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{base_url}/system_stats")
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        problems.append(f"ComfyUI not reachable at {base_url}: {exc}")
-        return problems, warnings  # nothing further to check without a reachable server
-
-    required_models: dict[str, list[str]] = {"UNETLoader": [], "CLIPLoader": [], "VAELoader": []}
-    if settings.image_provider == "comfyui":
-        required_models["UNETLoader"].append("flux-2-klein-4b.safetensors")
-        required_models["CLIPLoader"].append("qwen_3_4b.safetensors")
-        required_models["VAELoader"].append("flux2-vae.safetensors")
-    if settings.animation_provider == "comfyui":
-        required_models["UNETLoader"].append("wan2.2_ti2v_5B_fp16.safetensors")
-        required_models["CLIPLoader"].append("umt5_xxl_fp8_e4m3fn_scaled.safetensors")
-        required_models["VAELoader"].append("wan2.2_vae.safetensors")
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for node_type, expected_filenames in required_models.items():
-                if not expected_filenames:
-                    continue
-                response = await client.get(f"{base_url}/object_info/{node_type}")
-                response.raise_for_status()
-                info = response.json()
-
-                # Distinguish "structure looks unexpected, can't reliably
-                # tell" (warning) from "structure looks right, model
-                # genuinely isn't in the list" (hard problem) — chained
-                # .get(..., {}) calls would silently degrade an
-                # unexpected shape into an empty set, which looks
-                # identical to "confirmed no models available" and
-                # would wrongly hard-block on a parsing quirk rather
-                # than a genuine missing model. Sprint 4 Prompt 10.1.
-                if node_type not in info:
-                    warnings.append(
-                        f"/object_info/{node_type} response had no {node_type!r} key — could not verify "
-                        "model visibility for this node; confirm required models are installed manually."
-                    )
-                    continue
-
-                # ComfyUI's /object_info/<node> nests combo (dropdown)
-                # values under input.required.<field>[0] as a list.
-                input_spec = info[node_type].get("input", {}).get("required", {})
-                available: set[str] | None = None
-                for field_spec in input_spec.values():
-                    if isinstance(field_spec, list) and field_spec and isinstance(field_spec[0], list):
-                        available = (available or set()) | set(field_spec[0])
-
-                if available is None:
-                    warnings.append(
-                        f"/object_info/{node_type} response had no recognizable combo (dropdown) field — "
-                        "could not verify model visibility for this node; confirm required models are installed manually."
-                    )
-                    continue
-
-                for expected in expected_filenames:
-                    if expected not in available:
-                        # Confirmed: the response parsed as expected,
-                        # and this exact filename genuinely isn't in
-                        # the list ComfyUI reports — a hard, actionable
-                        # signal the generation would fail, not a mere
-                        # "couldn't determine" warning. A prior version
-                        # of this check routed this to `warnings`,
-                        # which let a paid acceptance run proceed
-                        # straight into a doomed generation.
-                        problems.append(
-                            f"Model {expected!r} not found via /object_info/{node_type} — "
-                            "confirm it's installed in the correct ComfyUI models directory."
-                        )
-    except (httpx.HTTPError, ValueError, KeyError, AttributeError) as exc:
-        warnings.append(
-            f"Could not verify model visibility via /object_info ({exc}) — proceeding without this "
-            "check; confirm required models are installed manually."
-        )
-
-    return problems, warnings
-
-
 def _print_plan_summary(plan: SingleShotPlan) -> None:
     print("=== Single-shot acceptance plan ===")
     print(f"shot index:          {plan.shot_index} of {plan.total_shots_in_timeline}")
@@ -309,7 +177,7 @@ async def _main() -> int:
         return 0
 
     if not args.skip_preflight:
-        problems, preflight_warnings = await _preflight_check(settings)
+        problems, preflight_warnings = await preflight_check(settings)
         for warning in preflight_warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
         if problems:
