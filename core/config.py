@@ -126,6 +126,11 @@ class Settings(BaseSettings):
     # eventually serve both FLUX (images) and Wan (animation) on one
     # GPU worker, per this task's own explicit instruction.
     comfyui_image_workflow_path: str = "products/chess2fight/rendering/workflows/flux2_klein_t2i_4b.json"
+    # Sprint 4 Prompt 13 — a separate workflow file for reference-
+    # conditioned/image-edit generation, deliberately not a hybrid of
+    # the proven T2I workflow above (see that file's own README for
+    # why: "prefer flux2_klein_t2i_4b.json remains proven T2I").
+    comfyui_reference_workflow_path: str = "products/chess2fight/rendering/workflows/flux2_klein_reference_4b.json"
     # 1280x704 - exactly 2x the experimentally-validated Wan 2.2 5B
     # resolution (640x352, from Prompt 4), so a FLUX keyframe needs no
     # cropping or aspect-ratio distortion before Wan conditioning.

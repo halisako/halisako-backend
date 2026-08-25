@@ -255,3 +255,86 @@ def generate_prompts(composed: ComposedTimeline) -> PromptedTimeline:
         shot_count=composed.shot_count,
         scene_continuity=composed.scene_continuity,
     )
+
+
+def _canonical_fighter_descriptor(fighter: FighterAppearance, label: str) -> str:
+    """Sprint 4 Prompt 13.1 — a focus-independent fighter description
+    for the reference-edit PRESERVE block.
+
+    Deliberately NOT `_fighter_descriptor` reused unchanged: that
+    function's own text is correct for identity (hair, facial
+    features, clothing, armor, weapon — every element, always), but
+    its `prominent` parameter wraps that text in framing language ("a
+    fighter with..." vs. "another fighter in the background with...")
+    that depends on `shot.focus` — exactly the mutable composition
+    information Sprint 4 Prompt 13.1's own Fix 4 identifies as wrongly
+    mixed into what should be an immutable, focus-independent PRESERVE
+    contract. This function reproduces the same underlying identity
+    text (same fields, same wording) without that wrapper, and without
+    creating any new fighter description or field — reusing
+    `FighterAppearance`'s existing fields directly, per this task's
+    own explicit instruction.
+
+    `label` ("Fighter A" / "Fighter B" below) is caller-supplied and
+    fixed per fighter (white always "Fighter A", black always "Fighter
+    B") — never derived from `shot.focus` — so calling this for the
+    same two fighters always produces the same two descriptions in the
+    same order, regardless of which fighter the shot happens to focus
+    on.
+    """
+    return (
+        f"{label}: {fighter.hair}, {fighter.facial_features}, wearing {fighter.clothing} and "
+        f"{fighter.armor}, wielding a {fighter.weapon}"
+    )
+
+
+def compose_reference_edit_prompt(shot: EnrichedShot) -> str:
+    """Sprint 4 Prompt 13 — the reference-edit prompt contract for a
+    shot generated via reference-conditioning against the fight's
+    canonical visual anchor, rather than independent text-to-image.
+
+    Deliberately NOT `_build_prompt(shot)` re-used unchanged: the plain
+    T2I prompt re-describes every visual identity detail from scratch
+    every time (correct for T2I, where there's no reference image to
+    lean on). Passing that same prompt unchanged into a reference-
+    conditioned/image-edit request would leave the editing model no
+    explicit instruction about what in the reference it should hold
+    fixed vs. what the new prompt is actually asking it to change —
+    exactly the ambiguity this explicit PRESERVE/CHANGE structure
+    exists to remove. No LLM call — deterministic composition from the
+    same underlying data `_build_prompt` itself uses.
+
+    Sprint 4 Prompt 13.1: PRESERVE now uses `_canonical_fighter_descriptor`
+    (focus-independent, fixed white="Fighter A"/black="Fighter B"
+    order) instead of `_character_clause` (which changes fighter order
+    and wording — "a fighter with..." vs. "another fighter in the
+    background with..." — based on `shot.focus`). An earlier version
+    of this function reused `_character_clause` directly, which mixed
+    that mutable, focus-dependent framing into what should be an
+    immutable PRESERVE contract — confirmed directly: changing a
+    shot's focus changed the PRESERVE text's fighter order/wording,
+    even though the two fighters' actual identities never changed.
+    Foreground/background prominence now lives only in the CHANGE
+    block, where it belongs. `_camera_clause` is still reused directly
+    (unaffected by this fix — it was never part of the identity
+    contradiction) for the same never-drift guarantee Prompt 13
+    established.
+    """
+    scene = shot.scene
+    preserve_fragments = [
+        "Preserve exactly from the reference image:",
+        _canonical_fighter_descriptor(scene.white_fighter, "Fighter A"),
+        _canonical_fighter_descriptor(scene.black_fighter, "Fighter B"),
+        "do not change face, hairstyle, clothing, armor, or exact weapon design for either fighter",
+        f"preserve the {scene.cinematic_art_style} art style",
+        f"preserve the {scene.arena.layout} and its environment identity",
+    ]
+    angle_phrase, movement_phrase, composition_phrase = _camera_clause(shot)
+    change_fragments = [
+        f"Change only: {shot.description}",
+        "fighter prominence and foreground/background placement for this shot",
+        angle_phrase,
+        movement_phrase,
+        composition_phrase,
+    ]
+    return compose_prompt_from_blocks(preserve_fragments, change_fragments)

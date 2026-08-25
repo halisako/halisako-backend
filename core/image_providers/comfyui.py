@@ -91,6 +91,13 @@ _NODE_HEIGHT = "77:85"  # PrimitiveInt (title "Height"), inputs.value
 _NODE_SEED = "77:86"  # RandomNoise, inputs.noise_seed
 _NODE_OUTPUT = "78"  # SaveImage
 
+# Sprint 4 Prompt 13 — reference-conditioned workflow only
+# (flux2_klein_reference_4b.json). Every other node ID above is
+# shared between both workflow files by construction — the reference
+# workflow is an additive extension of the T2I one, not a parallel
+# reconstruction (see that file's own README).
+_REF_NODE_LOAD_IMAGE = "ref:1"  # LoadImage, inputs.image
+
 # Model loader nodes (77:87 UNETLoader/flux-2-klein-4b.safetensors,
 # 77:88 CLIPLoader/qwen_3_4b.safetensors, 77:89 VAELoader/
 # flux2-vae.safetensors) and workflow constants (CFG=1 at 77:90,
@@ -162,6 +169,7 @@ class ComfyUIImageProvider(ImageProvider):
         timeout_seconds: float | None = None,
         output_dir: str | None = None,
         seed_override: Callable[[str], int] | None = None,
+        reference_workflow_path: str | None = None,
     ) -> None:
         """Initializes the provider.
 
@@ -199,6 +207,15 @@ class ComfyUIImageProvider(ImageProvider):
                 — production `FightVideoPipeline` never sets this,
                 leaving `None` (the existing per-prompt-hash behavior)
                 as its unchanged default.
+            reference_workflow_path: Sprint 4 Prompt 13 — path to the
+                reference-conditioned/image-edit workflow JSON, used
+                only by `generate_reference_conditioned_image` (never
+                by `generate_image`, the generic T2I method). Defaults
+                to `settings.comfyui_reference_workflow_path`. See
+                `workflows/README-reference-conditioning.md` for this
+                workflow file's own provenance and limits — unlike the
+                T2I workflow, it has not yet been proven on real
+                hardware.
         """
         self._base_url = (base_url if base_url is not None else settings.comfyui_base_url).rstrip("/")
         self._workflow_path = workflow_path if workflow_path is not None else settings.comfyui_image_workflow_path
@@ -208,6 +225,10 @@ class ComfyUIImageProvider(ImageProvider):
         self._output_dir = Path(output_dir if output_dir is not None else settings.image_output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._seed_override = seed_override
+        self._reference_workflow_path = (
+            reference_workflow_path if reference_workflow_path is not None
+            else settings.comfyui_reference_workflow_path
+        )
 
     def _resolve_seed(self, prompt: str) -> int:
         """The one seed-resolution rule this provider uses. Sprint 4
@@ -315,22 +336,192 @@ class ComfyUIImageProvider(ImageProvider):
             },
         )
 
+    # --- Sprint 4 Prompt 13: reference-conditioned generation ------------------
+    #
+    # A ComfyUIImageProvider-specific capability, not part of the
+    # generic ImageProvider interface (generate_image's signature
+    # above is completely untouched) — per this task's own explicit
+    # instruction not to overload the generic interface with
+    # reference-conditioning arguments. Only ever called directly by
+    # an acceptance/experiment caller that already knows it's holding
+    # a concrete ComfyUIImageProvider (see
+    # products/chess2fight/rendering/reference_continuity_acceptance.py)
+    # — RenderPipeline/ImageRouter never call this, and never need to
+    # know it exists, keeping RenderPipeline itself provider-agnostic
+    # exactly as before.
+
+    async def generate_reference_conditioned_image(
+        self, prompt: str, reference_image_path: str, width: int = 1024, height: int = 1024,
+    ) -> ImageGenerationResult:
+        """Generates an image conditioned on both `prompt` and a
+        reference image — the fight's canonical visual anchor, in
+        Halisako's own usage — via the reference-conditioned workflow
+        (`workflows/flux2_klein_reference_4b.json` by default; see
+        that file's own README before trusting its exact graph shape).
+
+        Mirrors `generate_image`'s own structure closely (same seed
+        resolution, same HTTP call sequence, same error wrapping) —
+        the only genuinely new step is uploading `reference_image_path`
+        before submission, reusing the same `/upload/image` endpoint
+        and subfolder-combining convention already proven in
+        `core/animation_providers/comfyui.py`'s own `_upload_image`
+        (mirrored here, not imported — these two provider modules stay
+        deliberately independent; see this module's own docstring).
+
+        Args:
+            prompt: The reference-edit prompt — expected to explicitly
+                distinguish what to preserve from the reference image
+                vs. what to change (see
+                `products/chess2fight/rendering/reference_continuity_acceptance.py`'s
+                own prompt-composition contract) — this method itself
+                has no opinion on prompt content, exactly like
+                `generate_image`.
+            reference_image_path: Local path to the reference image.
+            width: Output width, in pixels.
+            height: Output height, in pixels.
+
+        Raises:
+            ImageProviderError: On any failure — reference image
+                missing/unreadable, workflow file missing, ComfyUI
+                unreachable, generation failure, timeout, or an
+                invalid output — same failure contract as
+                `generate_image`. Never falls back to plain
+                text-to-image on any failure here: a caller that wants
+                that fallback must implement it explicitly, since
+                silently substituting T2I would invalidate whatever
+                reference-conditioning claim depends on this call
+                actually having happened.
+        """
+        start = time.monotonic()
+
+        if not Path(reference_image_path).exists():
+            raise ImageProviderError(f"Reference image not found: {reference_image_path!r}.")
+
+        seed = self._resolve_seed(prompt)
+
+        try:
+            workflow = self._load_workflow(self._reference_workflow_path)
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            raise ImageProviderError(str(exc)) from exc
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                try:
+                    uploaded_reference_name = await self._upload_reference_image(client, reference_image_path)
+                except httpx.HTTPError as exc:
+                    raise ImageProviderError(f"Reference image upload to ComfyUI failed: {exc}") from exc
+
+                try:
+                    prepared_workflow = self._inject_reference_parameters(
+                        workflow, prompt, width, height, seed, uploaded_reference_name,
+                    )
+                except ComfyUIImageRequestError as exc:
+                    raise ImageProviderError(f"Invalid workflow mapping: {exc}") from exc
+
+                try:
+                    prompt_id = await self._queue_prompt(client, prepared_workflow)
+                except httpx.HTTPError as exc:
+                    raise ImageProviderError(f"Workflow submission to ComfyUI failed: {exc}") from exc
+                except ComfyUIImageRequestError as exc:
+                    raise ImageProviderError(f"ComfyUI rejected the workflow: {exc}") from exc
+                logger.info("ComfyUI: queued reference-conditioned prompt_id=%s.", prompt_id)
+
+                try:
+                    history_entry = await self._wait_for_completion(client, prompt_id)
+                except TimeoutError as exc:
+                    raise ImageProviderError(f"Execution timeout: {exc}") from exc
+                except ComfyUIImageRequestError as exc:
+                    raise ImageProviderError(f"Generation failed: {exc}") from exc
+
+                try:
+                    filename, subfolder, file_type = self._extract_output_reference(history_entry)
+                except ComfyUIImageRequestError as exc:
+                    raise ImageProviderError(f"History/output missing: {exc}") from exc
+
+                try:
+                    image_bytes = await self._download_output(client, filename, subfolder, file_type)
+                except httpx.HTTPError as exc:
+                    raise ImageProviderError(f"Image download failed: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise ImageProviderError(f"Could not reach ComfyUI at {self._base_url!r}: {exc}") from exc
+
+        output_path = self._output_dir / f"comfyui_flux_reference_{seed}_{prompt_id}.png"
+        output_path.write_bytes(image_bytes)
+
+        try:
+            actual_width, actual_height = self._verify_image(output_path)
+        except ComfyUIImageRequestError as exc:
+            raise ImageProviderError(f"Invalid output image: {exc}") from exc
+
+        elapsed = time.monotonic() - start
+        return ImageGenerationResult(
+            image_path=str(output_path),
+            provider="ComfyUIImageProvider",
+            prompt=prompt,
+            width=actual_width,
+            height=actual_height,
+            generation_time_seconds=elapsed,
+            metadata={
+                "prompt_id": prompt_id,
+                "comfyui_base_url": self._base_url,
+                "seed": seed,
+                "model": "flux-2-klein-4b.safetensors (distilled) — same distilled stack as T2I, "
+                "reference-conditioned workflow not yet live-validated, Sprint 4 Prompt 13",
+                "reference_image_path": reference_image_path,
+                "uploaded_reference_name": uploaded_reference_name,
+            },
+        )
+
+    async def _upload_reference_image(self, client: httpx.AsyncClient, image_path: str) -> str:
+        """Uploads a local image to ComfyUI and returns the value the
+        reference workflow's `LoadImage` node's `image` input should
+        be set to.
+
+        Mirrors `core/animation_providers/comfyui.py`'s own
+        `_upload_image` exactly — same endpoint, same defensive
+        handling of a possibly-missing `subfolder` field, same
+        `subfolder/filename` convention when one is returned
+        non-empty. Not imported from there (these two provider
+        modules stay deliberately independent — see this module's own
+        docstring) — mirrored, so this method's own correctness
+        doesn't depend on the other module's.
+        """
+        image_bytes = Path(image_path).read_bytes()
+        response = await client.post(
+            f"{self._base_url}/upload/image",
+            files={"image": (Path(image_path).name, image_bytes, "image/png")},
+        )
+        response.raise_for_status()
+        data = response.json()
+        filename = data["name"]
+        subfolder = data.get("subfolder", "")
+        return f"{subfolder}/{filename}" if subfolder else filename
+
     # --- Workflow loading and parameter injection ---------------------------
 
-    def _load_workflow(self) -> dict[str, Any]:
-        """Loads the ComfyUI API-format FLUX workflow JSON from disk.
+    def _load_workflow(self, path_override: str | None = None) -> dict[str, Any]:
+        """Loads a ComfyUI API-format workflow JSON from disk.
+
+        Args:
+            path_override: Sprint 4 Prompt 13 — loads this path instead
+                of `self._workflow_path` when given (used by
+                `generate_reference_conditioned_image` to load
+                `self._reference_workflow_path` instead). `None`
+                (the default) preserves `generate_image`'s existing
+                call site exactly.
 
         Raises:
             FileNotFoundError: If no workflow file exists at the
                 configured path.
             json.JSONDecodeError: If the file exists but isn't valid JSON.
         """
-        path = Path(self._workflow_path)
+        path = Path(path_override if path_override is not None else self._workflow_path)
         if not path.exists():
             raise FileNotFoundError(
-                f"ComfyUI FLUX workflow file not found at {path!r}. Expected the validated "
-                "flux2_klein_t2i_4b.json (Sprint 4 Prompt 6) to already be in the repository — "
-                "has settings.comfyui_image_workflow_path been changed?"
+                f"ComfyUI workflow file not found at {path!r}. Expected the validated "
+                "flux2_klein_t2i_4b.json (Sprint 4 Prompt 6) or "
+                "flux2_klein_reference_4b.json (Sprint 4 Prompt 13) to already be in the "
+                "repository — has a *_workflow_path setting been changed?"
             )
         # Explicit encoding, not Path.read_text()'s platform default —
         # general Windows portability, matching the same fix applied to
@@ -380,6 +571,38 @@ class ComfyUIImageProvider(ImageProvider):
         self._set_node_input(prepared, _NODE_WIDTH, "value", norm_width)
         self._set_node_input(prepared, _NODE_HEIGHT, "value", norm_height)
         self._set_node_input(prepared, _NODE_SEED, "noise_seed", seed)
+
+        return prepared
+
+    def _inject_reference_parameters(
+        self, workflow: dict[str, Any], prompt: str, width: int, height: int, seed: int, uploaded_reference_name: str,
+    ) -> dict[str, Any]:
+        """Sprint 4 Prompt 13 — same structure as `_inject_parameters`,
+        for the reference-conditioned workflow: every node ID it
+        touches (`_NODE_PROMPT`, `_NODE_WIDTH`, `_NODE_HEIGHT`,
+        `_NODE_SEED`) is identical between both workflow files by
+        construction (see `flux2_klein_reference_4b.json`'s own
+        README), plus the one new node this workflow adds
+        (`_REF_NODE_LOAD_IMAGE`).
+
+        Raises:
+            ComfyUIImageRequestError: If an expected node ID is missing
+                — same meaning as `_inject_parameters`, but here it's a
+                genuinely open possibility this file's exact graph
+                shape doesn't match what this method assumes, not just
+                a hand-edit/corruption signal (see the workflow's own
+                README on why).
+        """
+        norm_width = _normalize_dimension(width)
+        norm_height = _normalize_dimension(height)
+
+        prepared = json.loads(json.dumps(workflow))  # plain-JSON deep copy
+
+        self._set_node_input(prepared, _NODE_PROMPT, "value", prompt)
+        self._set_node_input(prepared, _NODE_WIDTH, "value", norm_width)
+        self._set_node_input(prepared, _NODE_HEIGHT, "value", norm_height)
+        self._set_node_input(prepared, _NODE_SEED, "noise_seed", seed)
+        self._set_node_input(prepared, _REF_NODE_LOAD_IMAGE, "image", uploaded_reference_name)
 
         return prepared
 

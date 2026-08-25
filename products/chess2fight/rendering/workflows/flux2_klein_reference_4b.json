@@ -1,0 +1,274 @@
+{
+    "76": {
+        "inputs": {
+            "value": "Cinematic fantasy battle scene, two rival warriors facing each other in a ruined ancient arena, one warrior lunging forward with a rune-etched sword while the opponent braces defensively, dramatic low-angle camera, intense expressions, wind-blown clothing, sparks and dust, coherent anatomy, detailed armor, dynamic composition, anime-influenced cinematic realism, high detail, dramatic volumetric lighting."
+        },
+        "class_type": "PrimitiveStringMultiline",
+        "_meta": {
+            "title": "Prompt"
+        }
+    },
+    "78": {
+        "inputs": {
+            "filename_prefix": "Flux2-Klein-Reference",
+            "images": [
+                "77:82",
+                0
+            ]
+        },
+        "class_type": "SaveImage",
+        "_meta": {
+            "title": "Save Image"
+        }
+    },
+    "77:80": {
+        "inputs": {
+            "sampler_name": "euler"
+        },
+        "class_type": "KSamplerSelect",
+        "_meta": {
+            "title": "KSamplerSelect"
+        }
+    },
+    "77:81": {
+        "inputs": {
+            "noise": [
+                "77:86",
+                0
+            ],
+            "guider": [
+                "77:90",
+                0
+            ],
+            "sampler": [
+                "77:80",
+                0
+            ],
+            "sigmas": [
+                "77:93",
+                0
+            ],
+            "latent_image": [
+                "77:83",
+                0
+            ]
+        },
+        "class_type": "SamplerCustomAdvanced",
+        "_meta": {
+            "title": "SamplerCustomAdvanced"
+        }
+    },
+    "77:82": {
+        "inputs": {
+            "samples": [
+                "77:81",
+                0
+            ],
+            "vae": [
+                "77:89",
+                0
+            ]
+        },
+        "class_type": "VAEDecode",
+        "_meta": {
+            "title": "VAE Decode"
+        }
+    },
+    "77:83": {
+        "inputs": {
+            "width": [
+                "77:84",
+                0
+            ],
+            "height": [
+                "77:85",
+                0
+            ],
+            "batch_size": 1
+        },
+        "class_type": "EmptyFlux2LatentImage",
+        "_meta": {
+            "title": "Empty Flux 2 Latent"
+        }
+    },
+    "77:84": {
+        "inputs": {
+            "value": 1280
+        },
+        "class_type": "PrimitiveInt",
+        "_meta": {
+            "title": "Width"
+        }
+    },
+    "77:85": {
+        "inputs": {
+            "value": 704
+        },
+        "class_type": "PrimitiveInt",
+        "_meta": {
+            "title": "Height"
+        }
+    },
+    "77:86": {
+        "inputs": {
+            "noise_seed": 734791305612869
+        },
+        "class_type": "RandomNoise",
+        "_meta": {
+            "title": "RandomNoise"
+        }
+    },
+    "77:87": {
+        "inputs": {
+            "unet_name": "flux-2-klein-4b.safetensors",
+            "weight_dtype": "default"
+        },
+        "class_type": "UNETLoader",
+        "_meta": {
+            "title": "Load Diffusion Model"
+        }
+    },
+    "77:88": {
+        "inputs": {
+            "clip_name": "qwen_3_4b.safetensors",
+            "type": "flux2",
+            "device": "default"
+        },
+        "class_type": "CLIPLoader",
+        "_meta": {
+            "title": "Load CLIP"
+        }
+    },
+    "77:89": {
+        "inputs": {
+            "vae_name": "flux2-vae.safetensors"
+        },
+        "class_type": "VAELoader",
+        "_meta": {
+            "title": "Load VAE"
+        }
+    },
+    "77:90": {
+        "inputs": {
+            "cfg": 1,
+            "model": [
+                "77:87",
+                0
+            ],
+            "positive": [
+                "ref:3",
+                0
+            ],
+            "negative": [
+                "ref:4",
+                0
+            ]
+        },
+        "class_type": "CFGGuider",
+        "_meta": {
+            "title": "CFG Guider"
+        }
+    },
+    "77:91": {
+        "inputs": {
+            "conditioning": [
+                "77:92",
+                0
+            ]
+        },
+        "class_type": "ConditioningZeroOut",
+        "_meta": {
+            "title": "Conditioning Zero Out"
+        }
+    },
+    "77:92": {
+        "inputs": {
+            "text": [
+                "76",
+                0
+            ],
+            "clip": [
+                "77:88",
+                0
+            ]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Positive Prompt)"
+        }
+    },
+    "77:93": {
+        "inputs": {
+            "steps": 4,
+            "width": [
+                "77:84",
+                0
+            ],
+            "height": [
+                "77:85",
+                0
+            ]
+        },
+        "class_type": "Flux2Scheduler",
+        "_meta": {
+            "title": "Flux2Scheduler"
+        }
+    },
+    "ref:1": {
+        "inputs": {
+            "image": "anchor_placeholder.png"
+        },
+        "class_type": "LoadImage",
+        "_meta": {
+            "title": "Load Reference Image (Canonical Anchor)"
+        }
+    },
+    "ref:2": {
+        "inputs": {
+            "pixels": [
+                "ref:1",
+                0
+            ],
+            "vae": [
+                "77:89",
+                0
+            ]
+        },
+        "class_type": "VAEEncode",
+        "_meta": {
+            "title": "VAE Encode (Reference Image)"
+        }
+    },
+    "ref:3": {
+        "inputs": {
+            "conditioning": [
+                "77:92",
+                0
+            ],
+            "latent": [
+                "ref:2",
+                0
+            ]
+        },
+        "class_type": "ReferenceLatent",
+        "_meta": {
+            "title": "Reference Latent (Anchor Conditioning)"
+        }
+    },
+    "ref:4": {
+        "inputs": {
+            "conditioning": [
+                "77:91",
+                0
+            ],
+            "latent": [
+                "ref:2",
+                0
+            ]
+        },
+        "class_type": "ReferenceLatent",
+        "_meta": {
+            "title": "Reference Latent (Negative Branch)"
+        }
+    }
+}

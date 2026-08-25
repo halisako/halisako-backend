@@ -9,32 +9,45 @@ access itself — see `core/animation_providers/comfyui.py`'s own
 environment audit for that — so everything below reflects the supplied,
 externally-validated artifacts, not anything run in this environment.
 
-## Live milestone status (Sprint 4 Prompt 12)
+## Live milestone status (Sprint 4 Prompt 13)
 
 **PROVEN LIVE** — real RTX 4090, real ComfyUI history inspected directly:
 
 - Single-shot Chess2Fight: 1 FLUX job + 1 Wan job, real end-to-end
   success. `products/chess2fight/rendering/single_shot_acceptance.py`
   via `scripts/render_single_shot.py`.
-- Three-shot Chess2Fight: 3 FLUX jobs + 3 Wan jobs, real ComfyUI
-  history confirmed exactly 6 generation jobs, local concatenation via
+- Three-shot Chess2Fight, independent (per-prompt) FLUX seeds: 3 FLUX
+  jobs + 3 Wan jobs, real ComfyUI history confirmed exactly 6
+  generation jobs, local concatenation via
   `VideoBuilder.concatenate_clips()` into one real 51-frame, 6.375s
-  final MP4. `products/chess2fight/rendering/multi_shot_acceptance.py`
-  via `scripts/render_multi_shot_acceptance.py`. This same real
-  evidence also exposed prompt-composition and visual-identity-drift
-  findings addressed in Sprint 4 Prompt 12 — see that section below.
+  final MP4. This same real evidence also exposed prompt-composition
+  and visual-identity-drift findings addressed in Sprint 4 Prompt 12.
+- Three-shot Chess2Fight, shared FLUX seed: same 6-job/6.375s
+  generation-count and duration contract, `visual_seed_policy=shared`,
+  `fight_base_visual_seed=1697950441` confirmed injected into all
+  three FLUX jobs' `RandomNoise` node and recorded correctly as both
+  `planned_flux_seed` and `actual_flux_seed` for all three shots.
+  **Result: a material but insufficient improvement** — face/palette
+  visibly more stable across shots, but hairstyle, armor construction,
+  and especially weapon geometry (three genuinely different weapon
+  designs observed across three shots, for the same fighter, same
+  weapon *name* in every prompt) still drifted substantially. Directly
+  viewed and confirmed against the real generated keyframes, not just
+  the task's own description of them — this finding is what motivated
+  Sprint 4 Prompt 13's reference-conditioning work below.
 
 **NOT YET PROVEN**:
 
-- Visual identity consistency solution — Prompt 12 built the
-  architectural foundation (prompt composition hygiene, an explicit
-  stable/shot-specific composition contract, a FLUX seed policy) but
-  has not yet been GPU-tested; whether any of it actually improves
-  consistency is an empirical question for the next paid run.
-- Shared/derived-seed continuity experiment — implemented, not yet run
-  against a real ComfyUI server.
-- Reference-conditioned FLUX — audited (see Prompt 12's own
-  architectural assessment), not implemented.
+- Reference-conditioned FLUX generation (Sprint 4 Prompt 13) — built,
+  not yet GPU-tested. The new workflow file
+  (`flux2_klein_reference_4b.json`) is a well-grounded, research-based
+  extension of the proven T2I graph, not itself a supplied, validated
+  export like the other workflow files in this directory — see that
+  file's own README before trusting its exact graph shape. The first
+  real run against it is the validation step.
+- Whether reference-conditioning actually solves the identity-drift
+  problem the shared-seed experiment left unsolved is a genuinely open
+  empirical question for that first real run.
 - All 8 timeline shots / a complete fight render: not attempted, not
   built.
 
@@ -505,3 +518,78 @@ insufficient**: reference-conditioned FLUX generation, requiring a new
 workflow file, likely the undistilled base model, and a mechanism to
 generate/reuse canonical per-fighter reference images across shots —
 none of this is implemented, evaluated only.
+
+
+## Reference-conditioned visual continuity (Sprint 4 Prompt 13)
+
+**Correction to the Prompt 12 section above**: it speculated reference
+conditioning would "likely" require the undistilled base model. Fresh,
+targeted research (Sprint 4 Prompt 13's own explicit instruction not
+to assume this) found a dedicated, official "Flux.2 [Klein] 4B
+Distilled: Image Edit" ComfyUI workflow exists, using the exact same
+distilled model (`flux-2-klein-4b.safetensors`) Halisako's T2I
+workflow already uses — confirmed via multiple independent sources,
+including the same docs.comfy.org guide Prompt 12 used, whose second
+link (the distilled variant) was missed the first time. No model
+switch is needed for this experiment.
+
+### Mechanism
+
+`ReferenceLatent` — a standard, core ComfyUI node (by ComfyAnonymous,
+the core maintainer, not a third-party custom node) — is the
+documented mechanism: encode the reference image through the model's
+own VAE, feed that latent plus the prompt's own text conditioning into
+`ReferenceLatent`, and use its output as the sampler's positive
+conditioning instead of the plain text conditioning. Confirmed
+additive: bypassing `ReferenceLatent` is documented as producing plain
+T2I behavior from the same graph.
+
+### The new workflow file
+
+`workflows/flux2_klein_reference_4b.json` — see that file's own
+`README-reference-conditioning.md` for its full provenance. In short:
+constructed by extending the proven `flux2_klein_t2i_4b.json` graph
+with exactly three new nodes (`ref:1` LoadImage, `ref:2` VAEEncode,
+`ref:3` ReferenceLatent) and one redirected wire (`CFGGuider`'s
+`positive` input now points at `ref:3` instead of the plain
+`CLIPTextEncode` output). Every other node, model filename, and
+setting is byte-identical to the T2I workflow. Unlike every other
+workflow file in this directory, this one has **not** been proven on
+real hardware — the first real run against it is the validation step,
+not a formality.
+
+### Architecture
+
+`ComfyUIImageProvider.generate_reference_conditioned_image(prompt,
+reference_image_path, width, height)` — a new capability on the
+concrete provider class only; `ImageProvider.generate_image()`'s
+generic signature is completely unchanged (verified via a dedicated
+test). `products/chess2fight/rendering/reference_continuity_acceptance.py`
+orchestrates the experiment: shot 0 through the real, unchanged
+`RenderPipeline.render()`; shots 1/2 directly through the new provider
+capability, both referencing the identical anchor path (verified
+directly, not just asserted — a dedicated test confirms shot 2 never
+receives shot 1's own output as its reference).
+
+### Reference-edit prompt contract
+
+`compose_reference_edit_prompt()` in `prompt_generator.py` builds an
+explicit PRESERVE/CHANGE ONLY structure, reusing `_character_clause`
+and `_camera_clause` directly (not reimplemented) so the preserved
+identity text is always textually identical to what the T2I anchor
+prompt itself used.
+
+### Next paid command
+
+```bash
+export IMAGE_PROVIDER=comfyui
+export ANIMATION_PROVIDER=comfyui
+export COMFYUI_BASE_URL=http://127.0.0.1:8188
+
+python scripts/render_reference_continuity_acceptance.py --sample
+```
+
+Generation-count contract: 1 T2I anchor + 2 reference-conditioned FLUX
++ 3 Wan = 6 ComfyUI jobs, 1 local concatenation — identical to Prompt
+11/12's own contract. No new model files required — same distilled 4B
+stack as the T2I workflow.

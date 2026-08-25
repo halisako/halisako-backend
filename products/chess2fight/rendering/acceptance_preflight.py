@@ -26,11 +26,93 @@ production pipeline logic.
 
 from __future__ import annotations
 
+import json
 import shutil
 import uuid
 from pathlib import Path
 
 import httpx
+
+
+def validate_reference_workflow_topology(workflow_path: str) -> list[str]:
+    """Sprint 4 Prompt 13.1 — validates the reference-conditioned
+    workflow JSON contains the required conditioning topology, purely
+    by reading and parsing the file: no network calls, safe to run in
+    ordinary tests.
+
+    Checks:
+        - a VAEEncode node exists (encodes the reference image);
+        - a "positive" ReferenceLatent exists, fed by the positive
+          text conditioning;
+        - a "negative" ReferenceLatent exists, fed by
+          ConditioningZeroOut's output;
+        - CFGGuider.positive points at the positive ReferenceLatent;
+        - CFGGuider.negative points at the negative ReferenceLatent.
+
+    Returns a list of problem messages — empty means the topology
+    looks correct. Never raises on a missing/malformed file; a
+    problem describing that is returned instead, so this function's
+    return value alone is always sufficient for a preflight caller to
+    act on.
+    """
+    problems: list[str] = []
+    path = Path(workflow_path)
+    if not path.exists():
+        return [f"Reference workflow file not found: {path}"]
+
+    try:
+        workflow = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"Reference workflow file could not be read/parsed: {exc}"]
+
+    vae_encode_nodes = [node_id for node_id, node in workflow.items() if node.get("class_type") == "VAEEncode"]
+    if not vae_encode_nodes:
+        problems.append("Reference workflow has no VAEEncode node — the reference image would never be encoded.")
+
+    reference_latent_nodes = {
+        node_id: node for node_id, node in workflow.items() if node.get("class_type") == "ReferenceLatent"
+    }
+    if len(reference_latent_nodes) < 2:
+        problems.append(
+            f"Reference workflow has {len(reference_latent_nodes)} ReferenceLatent node(s), expected 2 "
+            "(one for the positive branch, one for the negative branch) — matching the official "
+            "Flux.2 Klein distilled image-edit topology."
+        )
+
+    guider_nodes = [node for node in workflow.values() if node.get("class_type") == "CFGGuider"]
+    if not guider_nodes:
+        problems.append("Reference workflow has no CFGGuider node.")
+        return problems  # nothing further to check without a guider to trace from
+
+    guider = guider_nodes[0]["inputs"]
+    positive_ref = guider.get("positive")
+    negative_ref = guider.get("negative")
+
+    def _points_at_a_reference_latent(link) -> bool:
+        return isinstance(link, list) and len(link) == 2 and link[0] in reference_latent_nodes
+
+    if not _points_at_a_reference_latent(positive_ref):
+        problems.append(
+            f"CFGGuider.positive ({positive_ref!r}) does not point at a ReferenceLatent node — "
+            "the positive branch would not be reference-conditioned."
+        )
+    if not _points_at_a_reference_latent(negative_ref):
+        problems.append(
+            f"CFGGuider.negative ({negative_ref!r}) does not point at a ReferenceLatent node — "
+            "the negative branch would not be reference-conditioned, contradicting the official topology."
+        )
+
+    # Confirm both ReferenceLatent nodes are fed the same latent (the
+    # single canonical anchor) — not two different/unrelated latents.
+    if len(reference_latent_nodes) >= 2:
+        latent_sources = {tuple(node["inputs"].get("latent", [])) for node in reference_latent_nodes.values()}
+        if len(latent_sources) > 1:
+            problems.append(
+                f"The {len(reference_latent_nodes)} ReferenceLatent nodes reference different latent sources "
+                f"({latent_sources}) — both should encode the SAME anchor image."
+            )
+
+    return problems
 
 
 def check_output_writability(paths: list[str]) -> list[str]:
@@ -72,7 +154,7 @@ def check_output_writability(paths: list[str]) -> list[str]:
     return problems
 
 
-async def preflight_check(settings) -> tuple[list[str], list[str]]:
+async def preflight_check(settings, check_reference_workflow: bool = False) -> tuple[list[str], list[str]]:
     """Checks obvious prerequisites for a REAL (comfyui) acceptance run
     before the first expensive generation call.
 
@@ -89,6 +171,17 @@ async def preflight_check(settings) -> tuple[list[str], list[str]]:
     uncertainty, not a confirmed absence — a warning, not a block. A
     no-op (returns ([], [])) for a mock run — there's nothing real to
     check.
+
+    Args:
+        check_reference_workflow: Sprint 4 Prompt 13 — when True, also
+            verifies `settings.comfyui_reference_workflow_path`
+            exists (the models it needs are the same distilled 4B
+            stack the FLUX check above already covers, so no separate
+            model-visibility check is needed for it). Defaults to
+            False, preserving this function's exact prior behavior for
+            its two existing callers (render_single_shot.py,
+            render_multi_shot_acceptance.py), neither of which uses
+            reference conditioning.
 
     Runs ONCE per acceptance run (called once by each CLI, not
     per-shot) — the checks here (reachability, workflow files, model
@@ -122,6 +215,10 @@ async def preflight_check(settings) -> tuple[list[str], list[str]]:
         flux_workflow = Path(settings.comfyui_image_workflow_path)
         if not flux_workflow.exists():
             problems.append(f"FLUX workflow file not found: {flux_workflow}")
+        if check_reference_workflow:
+            reference_workflow = Path(settings.comfyui_reference_workflow_path)
+            if not reference_workflow.exists():
+                problems.append(f"Reference-conditioned FLUX workflow file not found: {reference_workflow}")
     if settings.animation_provider == "comfyui":
         wan_workflow = Path(settings.comfyui_workflow_path)
         if not wan_workflow.exists():
@@ -204,5 +301,41 @@ async def preflight_check(settings) -> tuple[list[str], list[str]]:
             f"Could not verify model visibility via /object_info ({exc}) — proceeding without this "
             "check; confirm required models are installed manually."
         )
+
+    # Sprint 4 Prompt 13.1 — strict reference-capability preflight,
+    # only for a reference-conditioned acceptance run
+    # (check_reference_workflow=True). Deliberately does NOT reuse the
+    # model-visibility try/except above, and deliberately does NOT
+    # follow that check's own "uncertain parsing -> warning" policy —
+    # per this task's explicit instruction, inability to confirm
+    # ReferenceLatent/VAEEncode here is always a hard problem: if the
+    # node type genuinely isn't available, the reference job cannot
+    # possibly succeed, and generating the paid T2I anchor first would
+    # waste money for nothing. This is a stricter policy specific to
+    # this one check, not a change to Prompt 10/11's existing warning
+    # policy for the model-filename-list check above.
+    if check_reference_workflow and settings.image_provider == "comfyui":
+        topology_problems = validate_reference_workflow_topology(settings.comfyui_reference_workflow_path)
+        problems.extend(topology_problems)
+
+        for required_node_type in ("ReferenceLatent", "VAEEncode"):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(f"{base_url}/object_info/{required_node_type}")
+                    response.raise_for_status()
+                    info = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                problems.append(
+                    f"Could not confirm the {required_node_type!r} node is available on this ComfyUI "
+                    f"installation ({exc}) — required for reference-conditioned generation. Update ComfyUI "
+                    "or confirm this node is registered before spending GPU time on the anchor."
+                )
+                continue
+            if required_node_type not in info:
+                problems.append(
+                    f"{required_node_type!r} node not found via /object_info/{required_node_type} on this "
+                    "ComfyUI installation — required for reference-conditioned generation. This node may be "
+                    "missing from an outdated ComfyUI install; update before running this experiment."
+                )
 
     return problems, warnings
