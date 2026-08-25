@@ -9,26 +9,32 @@ access itself — see `core/animation_providers/comfyui.py`'s own
 environment audit for that — so everything below reflects the supplied,
 externally-validated artifacts, not anything run in this environment.
 
-## Live milestone status (Sprint 4 Prompt 11)
+## Live milestone status (Sprint 4 Prompt 12)
 
 **PROVEN LIVE** — real RTX 4090, real ComfyUI history inspected directly:
 
 - Single-shot Chess2Fight: 1 FLUX job + 1 Wan job, real end-to-end
   success. `products/chess2fight/rendering/single_shot_acceptance.py`
   via `scripts/render_single_shot.py`.
+- Three-shot Chess2Fight: 3 FLUX jobs + 3 Wan jobs, real ComfyUI
+  history confirmed exactly 6 generation jobs, local concatenation via
+  `VideoBuilder.concatenate_clips()` into one real 51-frame, 6.375s
+  final MP4. `products/chess2fight/rendering/multi_shot_acceptance.py`
+  via `scripts/render_multi_shot_acceptance.py`. This same real
+  evidence also exposed prompt-composition and visual-identity-drift
+  findings addressed in Sprint 4 Prompt 12 — see that section below.
 
-**NOT YET PROVEN LIVE**:
+**NOT YET PROVEN**:
 
-- Three-shot Chess2Fight: 3 FLUX jobs + 3 Wan jobs + local
-  concatenation into one final MP4.
-  `products/chess2fight/rendering/multi_shot_acceptance.py` via
-  `scripts/render_multi_shot_acceptance.py`. Built and thoroughly
-  tested against mock providers (see `tests/test_multi_shot_acceptance.py`);
-  the gated live test
-  (`tests/test_multi_shot_live_acceptance.py`,
-  `COMFYUI_MULTI_SHOT_LIVE_TEST=1`) has not yet been run against a real
-  server. Do not treat this as GPU-proven until that gated test
-  actually passes on real hardware.
+- Visual identity consistency solution — Prompt 12 built the
+  architectural foundation (prompt composition hygiene, an explicit
+  stable/shot-specific composition contract, a FLUX seed policy) but
+  has not yet been GPU-tested; whether any of it actually improves
+  consistency is an empirical question for the next paid run.
+- Shared/derived-seed continuity experiment — implemented, not yet run
+  against a real ComfyUI server.
+- Reference-conditioned FLUX — audited (see Prompt 12's own
+  architectural assessment), not implemented.
 - All 8 timeline shots / a complete fight render: not attempted, not
   built.
 
@@ -405,3 +411,97 @@ or a full `/render` fight — until the capped 3-shot command above
 succeeds and its evidence (6 ComfyUI history entries, 3 valid FLUX
 keyframes, 3 valid Wan clips, 1 valid concatenated MP4) has been
 manually reviewed.
+
+
+## Visual continuity foundation (Sprint 4 Prompt 12)
+
+The real three-shot GPU evidence's own manifest was inspected directly
+(not just the task's description of it) and confirmed: fighter
+identity text (hair, facial features, clothing, armor, weapon) was
+already byte-for-byte identical across all three shots for both
+fighters — `scene_composer.py`'s `compose_scene()` builds exactly one
+`SceneContinuity` per fight and assigns the same object to every shot,
+confirmed directly against source. The observed visual drift is
+therefore not explained by unstable prompt text. Two things were
+confirmed genuinely real instead:
+
+1. **A concrete prompt-composition bug**: the real evidence contained
+   `"...arena., deep dusk..."` — a duplicate-punctuation defect.
+   Reproduced from first principles (not assumed) by running the
+   actual pipeline: `shot.description` for the establishing shot ends
+   in a literal period (`timeline_engine.py`'s own f-string), and the
+   prior inline join only stripped trailing commas, not periods. Fixed
+   generally in `products/chess2fight/cinematic/prompt_composer.py`
+   (strips *any* trailing punctuation, not just the one observed
+   case). The task's three other named example defects
+   ("keylightis", "dynamicspeed", "thescene") were searched for
+   directly in the real evidence and were **not** found there —
+   reported honestly as illustrative examples of a defect class, not
+   literal strings this specific run produced.
+2. **Each shot's FLUX seed varies** (confirmed against the real
+   ComfyUI history: 2192948747, 1709036070, 1265274475) — not because
+   identity text varies, but because `_derive_seed()` hashes the
+   *entire* prompt string, which does vary shot-to-shot (different
+   action/camera/mood text). A shared or base-seed-derived FLUX seed
+   is therefore a genuinely untested variable, independent of the
+   prompt-hygiene fix above — see `visual_continuity.py`.
+
+### Prompt composition contract
+
+`prompt_generator.py`'s `_build_prompt()` now explicitly builds four
+named blocks — stable continuity, shot action, shot camera, global
+style — joined via `compose_prompt_from_blocks()` rather than one flat
+clause list joined by fragile raw string concatenation.
+
+### Visual seed policy
+
+```bash
+python scripts/render_multi_shot_acceptance.py --sample --dry-run --visual-seed-policy shared
+python scripts/render_multi_shot_acceptance.py --sample --dry-run --visual-seed-policy derived
+```
+
+`default` (unchanged pre-Prompt-12 behavior), `shared` (Policy A —
+every selected shot gets the identical fight-level base FLUX seed),
+`derived` (Policy B — deterministically derived per shot from the same
+base seed, still varies per shot). Wan's own seed derivation is
+**never** affected by this flag under any policy — still
+`_derive_seed(shot.image_prompt)`, exactly as before. Do not claim a
+shared seed guarantees identity consistency — this is a controlled
+experiment to run and observe, not a verified fix.
+
+### Reference-conditioning audit (researched, not implemented)
+
+FLUX.2 Klein — the model family Halisako already uses — natively
+supports reference-image conditioning (up to 4 reference images,
+guiding identity/style/composition), confirmed via current
+documentation and community workflows, not assumed. This is a
+**native model capability**, not a ControlNet/IP-Adapter-style add-on
+— the least invasive option among the families the task asked about.
+
+Two concrete caveats, both confirmed via research:
+
+- The reference-conditioned (image-edit) ComfyUI workflow graph is
+  **structurally different** from the plain text-to-image graph
+  Halisako currently uses (different nodes: multi-reference-latent
+  conditioning, a different sampler chain) — this would require a new
+  workflow file, not a parameter tweak to the existing one.
+- The 4B image-editing variant's documented example specifically uses
+  the **undistilled base** model, not the **distilled 4-step** model
+  Halisako currently runs (`flux-2-klein-4b.safetensors`, CFG=1,
+  steps=4). Distilled vs. base generation time differs by roughly an
+  order of magnitude in vendor-published benchmarks (~1.2s vs. ~17s on
+  a 5090) — reference-conditioning may carry a substantial per-shot
+  cost increase, not just an architectural one.
+- Community reports (not vendor-verified) describe multi-reference
+  results as sometimes inconsistent — face vs. outfit vs. background
+  can drift independently even with reference conditioning — relevant
+  given Halisako needs two distinct fighters' identities preserved
+  simultaneously in most shots, not one subject.
+
+**Implemented in Prompt 12**: prompt-composition hygiene, the explicit
+composition contract, the FLUX seed policy (shared/derived).
+**Possible next escalation if prompt+seed consistency proves
+insufficient**: reference-conditioned FLUX generation, requiring a new
+workflow file, likely the undistilled base model, and a mechanism to
+generate/reuse canonical per-fighter reference images across shots —
+none of this is implemented, evaluated only.

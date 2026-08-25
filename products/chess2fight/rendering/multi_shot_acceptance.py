@@ -81,13 +81,25 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.ai_router import AIProvider
-from core.animation_providers.comfyui import _duration_to_frame_count, _frame_count_to_duration
+from core.animation_providers.comfyui import (
+    _derive_seed as _derive_wan_seed,
+)
+from core.animation_providers.comfyui import (
+    _duration_to_frame_count,
+    _frame_count_to_duration,
+)
 from core.config import get_settings
+from core.image_providers.comfyui import _derive_seed as _derive_flux_seed
 from products.chess2fight.cinematic.schemas import PromptedShot, PromptedTimeline, SceneContinuity
 from products.chess2fight.orchestrator import FightOrchestrator
 from products.chess2fight.rendering.animation_pipeline import AnimationPipeline
 from products.chess2fight.rendering.asset_manager import AssetManager
 from products.chess2fight.rendering.render_pipeline import RenderPipeline
+from products.chess2fight.rendering.visual_continuity import (
+    VisualSeedPolicy,
+    build_seed_override,
+    derive_fight_base_visual_seed,
+)
 from products.chess2fight.rendering.video_builder import VideoBuilder
 from products.chess2fight.schemas import BattlePreferences
 
@@ -160,6 +172,30 @@ class MultiShotPlan(BaseModel):
         "(_frame_count_to_duration per shot) — the best available estimate before real "
         "container/encoding rounding, not a guarantee of the exact final measured value.",
     )
+    visual_seed_policy: str = Field(
+        default="default",
+        description="Sprint 4 Prompt 12 — which VisualSeedPolicy this plan was prepared under. "
+        "'default' means unchanged pre-Prompt-12 behavior: each shot's FLUX seed is independently "
+        "derived from its own prompt text, no fight-level base seed involved at all.",
+    )
+    fight_base_visual_seed: int | None = Field(
+        default=None,
+        description="This fight's deterministic base visual seed (derive_fight_base_visual_seed), "
+        "or None under the 'default' policy, where no base seed is computed or used.",
+    )
+    resolved_flux_seeds: list[int] = Field(
+        ..., min_length=1, description="Each selected shot's FLUX seed, in timeline order, as it "
+        "will actually be (or, for 'default' policy, already would be) requested — computed here "
+        "purely for display/manifest purposes, with zero ComfyUI calls; execute() applies the "
+        "identical policy for real via the injected render_pipeline's own seed_override.",
+    )
+    resolved_wan_seeds: list[int] = Field(
+        ..., min_length=1, description="Each selected shot's Wan seed, in timeline order. Always "
+        "_derive_seed(shot.image_prompt) — Wan's own seed derivation is never affected by "
+        "visual_seed_policy (see visual_continuity.py's own module docstring for why); included "
+        "here purely so dry-run/manifest evidence shows the complete picture, not because this "
+        "value ever changes based on the policy above.",
+    )
 
 
 class MultiShotAcceptanceResult(BaseModel):
@@ -189,6 +225,14 @@ class MultiShotAcceptanceResult(BaseModel):
     resolved_image_height: int = Field(..., gt=0, description="The actual FLUX image height used for this run.")
     resolved_animation_width: int = Field(..., gt=0, description="The actual Wan animation width used for this run.")
     resolved_animation_height: int = Field(..., gt=0, description="The actual Wan animation height used for this run.")
+    actual_flux_seeds: list[int] = Field(
+        ..., min_length=1, description="Sprint 4 Prompt 12.1 — each selected shot's ACTUAL FLUX seed, in "
+        "timeline order, as reported by the real image provider via RenderedFrame.metadata.generation_seed "
+        "— never re-derived from the prompt here. Distinguish from plan.resolved_flux_seeds, which is the "
+        "PLANNED value computed during prepare() with zero ComfyUI calls; under a non-default "
+        "visual_seed_policy, execute() verifies these agree before any Wan/animation call — see "
+        "SeedEvidenceMismatchError.",
+    )
 
 
 class ShotRangeOutOfRangeError(ValueError):
@@ -213,6 +257,22 @@ class FinalVideoMeasurementError(RuntimeError):
     Prompt 11.1's explicit requirement that a failed measurement must
     fail the acceptance run rather than silently falling back to the
     unmeasured, predicted duration and calling it "actual.\""""
+
+
+class SeedEvidenceMismatchError(RuntimeError):
+    """Raised by `execute()`, under a non-default visual seed policy,
+    when a shot's actual provider-reported FLUX seed
+    (RenderPipeline's own RenderedFrame.metadata.generation_seed)
+    disagrees with the seed `prepare()` planned for that shot — Sprint
+    4 Prompt 12.1's evidence-integrity requirement: a continuity
+    experiment's whole point is testing the effect of a specific seed
+    policy, so if the real provider didn't actually use the planned
+    seed, the resulting evidence isn't trustworthy. Raised before any
+    Wan/animation call — aborting after FLUX (already paid for) is
+    preferable to compounding an already-untrustworthy FLUX result
+    with three more paid Wan generations. Never raised under the
+    DEFAULT policy, where no planned-vs-actual comparison is made at
+    all (see `execute()`'s own logic for why)."""
 
 
 def _measure_video_duration_seconds(path: str) -> float:
@@ -286,6 +346,7 @@ class MultiShotAcceptanceRunner:
         fps: int | None = None,
         max_animation_seconds: float | None = None,
         allow_exceeding_default_cap: bool = False,
+        visual_seed_policy: VisualSeedPolicy = VisualSeedPolicy.DEFAULT,
     ) -> MultiShotPlan:
         """Runs the real orchestration/cinematic pipeline and selects a
         capped shot range. Makes no ComfyUI or network calls — safe
@@ -309,6 +370,17 @@ class MultiShotAcceptanceRunner:
                 request more than `_DEFAULT_MAX_SHOT_COUNT` (3) shots —
                 a deliberate friction point, not a convenience default,
                 per this task's explicit cost-control requirement.
+            visual_seed_policy: Sprint 4 Prompt 12 — how each selected
+                shot's FLUX seed is resolved. Defaults to
+                `VisualSeedPolicy.DEFAULT` — unchanged pre-Prompt-12
+                behavior. Only affects the *plan's* computed
+                `resolved_flux_seeds`/`fight_base_visual_seed` fields
+                here — actually applying this policy during `execute()`
+                requires the caller to have constructed this runner's
+                `render_pipeline` with a matching `seed_override` (see
+                `visual_continuity.py`'s own module docstring); this
+                method never constructs or reconfigures a provider
+                itself.
 
         Returns:
             A MultiShotPlan describing exactly what execute() would do.
@@ -364,6 +436,27 @@ class MultiShotAcceptanceRunner:
             selected_indices, len(all_shots), resolved_fps, expected_assembled_duration,
         )
 
+        # Sprint 4 Prompt 12: computed purely from already-known prompt
+        # text — zero ComfyUI/network calls, safe for dry-run, exactly
+        # like everything else in this method. Wan's own seed is always
+        # _derive_wan_seed(shot.image_prompt) regardless of policy (see
+        # visual_continuity.py's own module docstring for why); only
+        # the FLUX side is ever affected by visual_seed_policy.
+        base_visual_seed = (
+            derive_fight_base_visual_seed(pgn, preferences.style, preferences.battle_mode.value)
+            if visual_seed_policy != VisualSeedPolicy.DEFAULT else None
+        )
+        flux_seed_override = (
+            build_seed_override(visual_seed_policy, base_visual_seed)
+            if base_visual_seed is not None else None
+        )
+        resolved_flux_seeds = [
+            flux_seed_override(shot.image_prompt) if flux_seed_override is not None
+            else _derive_flux_seed(shot.image_prompt)
+            for shot in selected_shots
+        ]
+        resolved_wan_seeds = [_derive_wan_seed(shot.image_prompt) for shot in selected_shots]
+
         return MultiShotPlan(
             fight_id=f"multi_shot_{uuid.uuid4().hex}",
             start_shot_index=start_shot_index,
@@ -383,6 +476,10 @@ class MultiShotAcceptanceRunner:
             fps=resolved_fps,
             expected_comfyui_job_count=2 * shot_count,
             expected_assembled_duration_seconds=expected_assembled_duration,
+            visual_seed_policy=visual_seed_policy.value,
+            fight_base_visual_seed=base_visual_seed,
+            resolved_flux_seeds=resolved_flux_seeds,
+            resolved_wan_seeds=resolved_wan_seeds,
         )
 
     async def execute(
@@ -422,6 +519,11 @@ class MultiShotAcceptanceRunner:
             FinalVideoMeasurementError: If concatenation succeeds but
                 the resulting file's duration can't be measured with
                 ffprobe afterward.
+            SeedEvidenceMismatchError: Under a non-default
+                visual_seed_policy, if any shot's actual
+                provider-reported FLUX seed disagrees with the seed
+                `prepare()` planned — raised before any Wan/animation
+                call.
         """
         settings = get_settings()
         resolved_animation_width = width if width is not None else settings.comfyui_animation_default_width
@@ -433,6 +535,36 @@ class MultiShotAcceptanceRunner:
         render_output = await self._render_pipeline.render(
             render_timeline, plan.fight_id, width=resolved_image_width, height=resolved_image_height,
         )
+
+        # Sprint 4 Prompt 12.1: the actual, provider-reported seed per
+        # shot — RenderPipeline's own RenderedFrame.metadata already
+        # carries this (see that module's Prompt 12.1 fix), never
+        # re-derived from the prompt here. Order matches render_output.frames,
+        # which itself matches plan.shots' order (RenderPipeline preserves
+        # order — verified directly against its source; see this module's
+        # own docstring).
+        actual_flux_seeds = [frame.metadata.generation_seed for frame in render_output.frames]
+
+        # Evidence-integrity check, non-default policy only: under
+        # DEFAULT, plan.resolved_flux_seeds is itself just
+        # _derive_seed(prompt) per shot with no experimental claim
+        # riding on it, so there's nothing meaningful to verify. Under
+        # SHARED/DERIVED, this continuity experiment's entire point is
+        # testing a specific seed policy's effect — if the real
+        # provider didn't actually use the planned seed, proceeding to
+        # spend three more paid Wan generations on that shot would
+        # produce untrustworthy evidence. Raised here, strictly before
+        # any Wan/animation call below.
+        if plan.visual_seed_policy != VisualSeedPolicy.DEFAULT.value:
+            for i, (planned, actual) in enumerate(zip(plan.resolved_flux_seeds, actual_flux_seeds, strict=True)):
+                if planned != actual:
+                    raise SeedEvidenceMismatchError(
+                        f"Shot at timeline index {plan.selected_shot_indices[i]} "
+                        f"(shot_id={plan.shots[i].shot_id!r}): planned FLUX seed {planned} "
+                        f"(visual_seed_policy={plan.visual_seed_policy!r}) does not match the actual "
+                        f"provider-reported seed {actual} — aborting before any Wan generation to avoid "
+                        f"spending paid GPU time on untrustworthy continuity-experiment evidence."
+                    )
 
         animation_shots = [
             shot if effective_duration == shot.duration_seconds
@@ -500,6 +632,7 @@ class MultiShotAcceptanceRunner:
             resolved_image_height=resolved_image_height,
             resolved_animation_width=resolved_animation_width,
             resolved_animation_height=resolved_animation_height,
+            actual_flux_seeds=actual_flux_seeds,
         )
 
     def _build_multi_shot_timeline(self, plan: MultiShotPlan, shots: list[PromptedShot]) -> PromptedTimeline:

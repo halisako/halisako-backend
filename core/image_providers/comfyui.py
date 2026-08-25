@@ -65,7 +65,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from PIL import Image
@@ -161,6 +161,7 @@ class ComfyUIImageProvider(ImageProvider):
         workflow_path: str | None = None,
         timeout_seconds: float | None = None,
         output_dir: str | None = None,
+        seed_override: Callable[[str], int] | None = None,
     ) -> None:
         """Initializes the provider.
 
@@ -179,6 +180,25 @@ class ComfyUIImageProvider(ImageProvider):
                 `settings.image_output_dir` (shared with
                 MockImageProvider — both providers' outputs live in the
                 same configured location).
+            seed_override: Sprint 4 Prompt 12 — an optional function
+                from prompt text to a seed, replacing the default
+                `_derive_seed(prompt)` when given. Deliberately a
+                *callable*, not a fixed int: this lets one provider
+                instance serve either a "shared" visual-continuity
+                experiment (the callable ignores its argument and
+                always returns the same fight-level base seed) or a
+                "derived" one (the callable combines the base seed with
+                each shot's own prompt, still varying per shot) without
+                needing a different provider instance per shot — the
+                generic `ImageProvider.generate_image(prompt, width,
+                height)` interface itself is completely unchanged; this
+                is a `ComfyUIImageProvider`-specific constructor option,
+                not a new abstract-method parameter. Only ever set by
+                an acceptance/experiment caller (see
+                `products/chess2fight/rendering/visual_continuity.py`)
+                — production `FightVideoPipeline` never sets this,
+                leaving `None` (the existing per-prompt-hash behavior)
+                as its unchanged default.
         """
         self._base_url = (base_url if base_url is not None else settings.comfyui_base_url).rstrip("/")
         self._workflow_path = workflow_path if workflow_path is not None else settings.comfyui_image_workflow_path
@@ -187,9 +207,41 @@ class ComfyUIImageProvider(ImageProvider):
         )
         self._output_dir = Path(output_dir if output_dir is not None else settings.image_output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._seed_override = seed_override
+
+    def _resolve_seed(self, prompt: str) -> int:
+        """The one seed-resolution rule this provider uses. Sprint 4
+        Prompt 12.1: called exactly ONCE per `generate_image()`
+        invocation (from that method itself, at the top) — the
+        resulting value is then threaded through as a parameter to
+        every seed-bearing use site (`_inject_parameters`, the local
+        output filename, and the returned `metadata["seed"]`), rather
+        than each site calling this method separately. A prior version
+        of this docstring said calling this method from multiple sites
+        was itself sufficient to keep them in agreement — true only
+        because the Prompt 12 shared/derived seed_override callables
+        happen to be pure; nothing about accepting an arbitrary
+        `Callable[[str], int]` guarantees that in general, so resolving
+        once and reusing the value is the actual guarantee now, not an
+        assumption about caller purity.
+        """
+        return self._seed_override(prompt) if self._seed_override is not None else _derive_seed(prompt)
 
     async def generate_image(self, prompt: str, width: int = 1024, height: int = 1024) -> ImageGenerationResult:
         start = time.monotonic()
+
+        # Sprint 4 Prompt 12.1: resolved exactly ONCE per generate_image()
+        # call, then threaded through to every seed-bearing use site below
+        # (workflow injection, the local filename, and the returned
+        # metadata) — never re-resolved. The Prompt 12 shared/derived
+        # seed_override callables happen to be pure (same prompt always
+        # yields the same value), so calling _resolve_seed() multiple
+        # times previously produced the same number in practice — but
+        # ComfyUIImageProvider's constructor accepts an arbitrary
+        # Callable[[str], int], and nothing guarantees every future
+        # override stays pure. Resolving once and reusing the exact value
+        # is correct regardless of what the override does internally.
+        seed = self._resolve_seed(prompt)
 
         try:
             workflow = self._load_workflow()
@@ -197,7 +249,7 @@ class ComfyUIImageProvider(ImageProvider):
             raise ImageProviderError(str(exc)) from exc
 
         try:
-            prepared_workflow = self._inject_parameters(workflow, prompt, width, height)
+            prepared_workflow = self._inject_parameters(workflow, prompt, width, height, seed)
         except ComfyUIImageRequestError as exc:
             raise ImageProviderError(f"Invalid workflow mapping: {exc}") from exc
 
@@ -234,7 +286,12 @@ class ComfyUIImageProvider(ImageProvider):
         # of the pipeline (RenderPipeline, AnimationPipeline) only ever
         # deals with local Halisako paths, never a ComfyUI-only
         # reference; see this task's Task 5 handoff verification.
-        output_path = self._output_dir / f"comfyui_flux_{_derive_seed(prompt)}_{prompt_id}.png"
+        # Sprint 4 Prompt 12.1: uses the same `seed` resolved once above
+        # — previously called _derive_seed(prompt) directly here,
+        # bypassing any seed_override entirely, so a shared-seed
+        # generation's local filename could claim an unrelated
+        # per-prompt hash instead of the seed ComfyUI actually used.
+        output_path = self._output_dir / f"comfyui_flux_{seed}_{prompt_id}.png"
         output_path.write_bytes(image_bytes)
 
         try:
@@ -253,7 +310,7 @@ class ComfyUIImageProvider(ImageProvider):
             metadata={
                 "prompt_id": prompt_id,
                 "comfyui_base_url": self._base_url,
-                "seed": _derive_seed(prompt),
+                "seed": seed,
                 "model": "flux-2-klein-4b.safetensors (distilled) — experimentally validated, Sprint 4 Prompt 6",
             },
         )
@@ -284,7 +341,9 @@ class ComfyUIImageProvider(ImageProvider):
         # compatible. Sprint 4 Prompt 7.1.
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def _inject_parameters(self, workflow: dict[str, Any], prompt: str, width: int, height: int) -> dict[str, Any]:
+    def _inject_parameters(
+        self, workflow: dict[str, Any], prompt: str, width: int, height: int, seed: int,
+    ) -> dict[str, Any]:
         """Injects prompt/seed/dimensions into a *copy* of the loaded
         workflow graph, targeting exact validated node IDs — the
         original loaded dict is never mutated, so it can be safely
@@ -295,6 +354,16 @@ class ComfyUIImageProvider(ImageProvider):
         workflow have a real negative-prompt text node to preserve or
         override — see module docstring.
 
+        Args:
+            seed: The already-resolved seed to inject — Sprint 4
+                Prompt 12.1: this method no longer resolves its own
+                seed via `_resolve_seed(prompt)`; the caller
+                (`generate_image`) resolves it exactly once and passes
+                the same value here and to every other seed-bearing
+                use site, so a stateful seed_override (however unlikely
+                today) can never cause the injected workflow seed and
+                the reported result seed to disagree.
+
         Raises:
             ComfyUIImageRequestError: If an expected node ID is missing
                 from the loaded workflow — a hard error now, not a
@@ -302,7 +371,6 @@ class ComfyUIImageProvider(ImageProvider):
                 verified file (see module docstring on why this
                 differs from Prompt 5's title-lookup behavior).
         """
-        seed = _derive_seed(prompt)
         norm_width = _normalize_dimension(width)
         norm_height = _normalize_dimension(height)
 

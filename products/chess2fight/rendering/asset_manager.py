@@ -31,16 +31,23 @@ from core.config import settings
 class FrameMetadata(BaseModel):
     """Everything recorded about one rendered frame.
 
-    `generation_seed` is a deterministic value derived from the
-    frame's prompt (see `render_pipeline.py`'s `_derive_seed`) —
-    recorded for traceability/reproducibility, matching what a real
-    generative provider's own seed parameter would mean. The current
-    `ImageProvider` interface (core/image_router.py) doesn't accept an
-    explicit seed at all — it's already fully prompt-deterministic on
-    its own — so this value is computed independently here rather than
-    actually threaded into the generation call. A future real provider
-    integration would need to extend that interface for this seed to
-    control the actual generation, not just label it after the fact.
+    `generation_seed` records the actual seed the image provider
+    reports using, when it reports one (via
+    `ImageGenerationResult.metadata["seed"]` — a generic field any
+    provider may populate; RenderPipeline reads it without importing
+    anything provider-specific). `ComfyUIImageProvider` reports its
+    real, actually-injected seed this way — including under Sprint 4
+    Prompt 12's shared/derived visual-continuity seed policies, where
+    it's no longer simply a hash of the prompt. For a provider that
+    doesn't report a seed at all (e.g. `MockImageProvider`, whose
+    metadata carries no "seed" key), this falls back to a deterministic
+    value derived from the frame's prompt (`render_pipeline.py`'s
+    `_derive_seed`) — recorded for traceability/reproducibility even
+    without a real provider-reported value. An earlier version of this
+    docstring said this value was always independently computed rather
+    than threaded into generation, on the reasoning that the interface
+    didn't support it — true before Prompt 12's seed_override existed,
+    no longer the accurate description for ComfyUIImageProvider.
     """
 
     frame_number: int = Field(..., ge=1, description="1-indexed frame number within the fight.")
@@ -53,7 +60,10 @@ class FrameMetadata(BaseModel):
         default_factory=list, description="Chess move labels this frame dramatizes, if any."
     )
     timestamp: str = Field(..., min_length=1, description="ISO 8601 UTC timestamp of when this frame was rendered.")
-    generation_seed: int = Field(..., description="Deterministic seed value derived from this frame's prompt.")
+    generation_seed: int = Field(
+        ..., description="The actual seed the image provider reported using, when available; otherwise a "
+        "deterministic value derived from this frame's prompt."
+    )
 
 
 class RenderManifest(BaseModel):

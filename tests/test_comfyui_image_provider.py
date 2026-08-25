@@ -172,7 +172,7 @@ def test_colon_containing_node_ids_are_treated_as_string_keys():
     assert "77:84" in workflow
     assert "77:85" in workflow
     assert "77:86" in workflow
-    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704)
+    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704, 12345)
     assert prepared["77:84"]["inputs"]["value"] == 1280
 
 
@@ -183,7 +183,7 @@ def test_prompt_injected_only_at_node_76():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
     original = copy.deepcopy(workflow)
-    prepared = provider._inject_parameters(workflow, "a unique battle prompt", 1280, 704)
+    prepared = provider._inject_parameters(workflow, "a unique battle prompt", 1280, 704, 12345)
 
     assert prepared["76"]["inputs"]["value"] == "a unique battle prompt"
     # No other node's "value"/"text" input changed.
@@ -201,7 +201,7 @@ def test_prompt_injected_only_at_node_76():
 def test_width_injected_only_at_node_77_84():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704)
+    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704, 12345)
     assert prepared["77:84"]["inputs"]["value"] == 1280
     assert prepared["77:85"]["inputs"]["value"] == 704  # sanity: different node, different value
 
@@ -209,7 +209,7 @@ def test_width_injected_only_at_node_77_84():
 def test_height_injected_only_at_node_77_85():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a prompt", 960, 544)
+    prepared = provider._inject_parameters(workflow, "a prompt", 960, 544, 12345)
     assert prepared["77:85"]["inputs"]["value"] == 544
     assert prepared["77:84"]["inputs"]["value"] == 960
 
@@ -217,7 +217,7 @@ def test_height_injected_only_at_node_77_85():
 def test_dimensions_normalized_to_nearest_multiple_of_16():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a prompt", 1000, 700)
+    prepared = provider._inject_parameters(workflow, "a prompt", 1000, 700, 12345)
     assert prepared["77:84"]["inputs"]["value"] % 16 == 0
     assert prepared["77:85"]["inputs"]["value"] % 16 == 0
 
@@ -228,8 +228,9 @@ def test_dimensions_normalized_to_nearest_multiple_of_16():
 def test_seed_injected_only_at_node_77_86():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a specific prompt", 1280, 704)
-    assert prepared["77:86"]["inputs"]["noise_seed"] == _derive_seed("a specific prompt")
+    seed = _derive_seed("a specific prompt")
+    prepared = provider._inject_parameters(workflow, "a specific prompt", 1280, 704, seed)
+    assert prepared["77:86"]["inputs"]["noise_seed"] == seed
 
 
 def test_same_prompt_always_derives_the_same_seed():
@@ -246,7 +247,7 @@ def test_different_prompts_derive_different_seeds():
 def test_model_node_names_remain_unchanged_after_injection():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704)
+    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704, 12345)
     assert prepared["77:87"]["inputs"]["unet_name"] == "flux-2-klein-4b.safetensors"
     assert prepared["77:88"]["inputs"]["clip_name"] == "qwen_3_4b.safetensors"
     assert prepared["77:88"]["inputs"]["type"] == "flux2"
@@ -259,21 +260,21 @@ def test_model_node_names_remain_unchanged_after_injection():
 def test_cfg_remains_1():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704)
+    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704, 12345)
     assert prepared["77:90"]["inputs"]["cfg"] == 1
 
 
 def test_steps_remains_4():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704)
+    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704, 12345)
     assert prepared["77:93"]["inputs"]["steps"] == 4
 
 
 def test_sampler_remains_euler():
     provider = ComfyUIImageProvider(workflow_path=REAL_WORKFLOW_PATH)
     workflow = provider._load_workflow()
-    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704)
+    prepared = provider._inject_parameters(workflow, "a prompt", 1280, 704, 12345)
     assert prepared["77:80"]["inputs"]["sampler_name"] == "euler"
 
 
@@ -307,8 +308,8 @@ def test_two_calls_do_not_mutate_or_leak_between_each_other():
     workflow = provider._load_workflow()
     original_prompt_text = workflow["76"]["inputs"]["value"]
 
-    prepared1 = provider._inject_parameters(workflow, "prompt one", 1280, 704)
-    prepared2 = provider._inject_parameters(workflow, "prompt two", 960, 544)
+    prepared1 = provider._inject_parameters(workflow, "prompt one", 1280, 704, 111)
+    prepared2 = provider._inject_parameters(workflow, "prompt two", 960, 544, 222)
 
     assert workflow["76"]["inputs"]["value"] == original_prompt_text  # loaded dict untouched
     assert prepared1["76"]["inputs"]["value"] == "prompt one"
@@ -353,7 +354,7 @@ def test_missing_expected_node_raises_useful_error():
     workflow = provider._load_workflow()
     del workflow["77:86"]  # simulate a hand-edited/corrupted workflow
     try:
-        provider._inject_parameters(workflow, "a prompt", 1280, 704)
+        provider._inject_parameters(workflow, "a prompt", 1280, 704, 12345)
         raise AssertionError("should have raised")
     except ComfyUIImageRequestError as e:
         assert "77:86" in str(e)

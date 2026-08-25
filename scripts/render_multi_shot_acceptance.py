@@ -64,12 +64,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.ai_router import get_ai_provider  # noqa: E402
 from core.config import get_settings  # noqa: E402
+from core.image_providers.comfyui import ComfyUIImageProvider  # noqa: E402
+from core.image_router import ImageProviderRegistry, ImageRouter, MockImageProvider  # noqa: E402
 from products.chess2fight.rendering.acceptance_preflight import check_output_writability, preflight_check  # noqa: E402
 from products.chess2fight.rendering.multi_shot_acceptance import (  # noqa: E402
     MultiShotAcceptanceRunner,
     MultiShotPlan,
     ShotCountExceedsAcceptanceCapError,
     ShotRangeOutOfRangeError,
+)
+from products.chess2fight.rendering.render_pipeline import RenderPipeline  # noqa: E402
+from products.chess2fight.rendering.visual_continuity import (  # noqa: E402
+    VisualSeedPolicy,
+    build_seed_override,
+    derive_fight_base_visual_seed,
 )
 from products.chess2fight.schemas import BattleMode, BattlePreferences  # noqa: E402
 
@@ -148,6 +156,16 @@ def _parse_args() -> argparse.Namespace:
         "--skip-preflight", action="store_true",
         help="Skip the pre-generation preflight checks. Never enabled automatically.",
     )
+    parser.add_argument(
+        "--visual-seed-policy", type=str, default="default", choices=[p.value for p in VisualSeedPolicy],
+        help="Sprint 4 Prompt 12 — how each selected shot's FLUX seed is resolved. 'default' "
+        "(unchanged pre-Prompt-12 behavior): each shot's FLUX seed is independently derived from its "
+        "own prompt text. 'shared': every selected shot gets the identical fight-level base seed — a "
+        "controlled experiment, not a guarantee of improved visual identity consistency. 'derived': "
+        "every shot's seed is deterministically derived from the base seed combined with that shot's "
+        "own prompt (varies per shot, unlike 'shared', but reproducible from the base seed). Wan's "
+        "own seed is never affected by this flag, under any policy.",
+    )
     return parser.parse_args()
 
 
@@ -171,6 +189,24 @@ def _print_plan_summary(
 ) -> None:
     print("=== Multi-shot acceptance plan ===")
     print(f"selected shot indexes: {plan.selected_shot_indices} (of {plan.total_shots_in_timeline} total)")
+
+    # Sprint 4 Prompt 12: stable, fight-level visual descriptors —
+    # shown once here, not per shot, since they're identical across
+    # every selected shot by construction (compose_scene() builds
+    # exactly one SceneContinuity per fight; see
+    # prompt_generator.py's own _stable_continuity_block docstring for
+    # the direct verification of this).
+    scene = plan.shots[0].scene
+    print("--- stable fighter visual descriptors (identical across every selected shot) ---")
+    print(f"  white: {scene.white_fighter.hair}, {scene.white_fighter.facial_features}, "
+          f"wearing {scene.white_fighter.clothing} and {scene.white_fighter.armor}, "
+          f"wielding a {scene.white_fighter.weapon}")
+    print(f"  black: {scene.black_fighter.hair}, {scene.black_fighter.facial_features}, "
+          f"wearing {scene.black_fighter.clothing} and {scene.black_fighter.armor}, "
+          f"wielding a {scene.black_fighter.weapon}")
+    print(f"stable arena descriptor: {scene.arena.layout}, {scene.arena.time_of_day}, {scene.arena.weather}")
+    print(f"stable art style: {scene.cinematic_art_style}")
+
     for i, (shot, orig_dur, eff_dur, frames) in enumerate(
         zip(plan.shots, [s.duration_seconds for s in plan.shots],
             plan.effective_animation_durations_seconds, plan.calculated_wan_frame_counts, strict=True)
@@ -178,6 +214,9 @@ def _print_plan_summary(
         idx = plan.selected_shot_indices[i]
         abbreviated_prompt = shot.image_prompt[:100] + ("..." if len(shot.image_prompt) > 100 else "")
         print(f"  shot[{idx}] type={shot.shot_type.value!r} original={orig_dur:.2f}s effective={eff_dur:.2f}s frames={frames}")
+        print(f"    action:  {shot.description}")
+        print(f"    camera:  {shot.camera_angle.value}, {shot.camera_motion.value}")
+        print(f"    flux seed: {plan.resolved_flux_seeds[i]}   wan seed: {plan.resolved_wan_seeds[i]}")
         print(f"    prompt: {abbreviated_prompt}")
     print(f"image provider:      {plan.image_provider}")
     print(f"animation provider:  {plan.animation_provider}")
@@ -195,6 +234,15 @@ def _print_plan_summary(
     print(f"FLUX image resolution:      {resolved_image_width}x{resolved_image_height}")
     print(f"Wan animation resolution:   {resolved_animation_width}x{resolved_animation_height}")
     print(f"resolved fps:        {plan.fps}")
+    # Sprint 4 Prompt 12: visual seed policy — the fight's base seed is
+    # None under 'default' (no fight-level seed is computed or used at
+    # all under that policy; each shot's FLUX seed is independently
+    # derived from its own prompt text, unchanged from pre-Prompt-12
+    # behavior). Wan's own seed is always _derive_seed(shot.image_prompt)
+    # regardless of policy — shown per shot above for complete evidence,
+    # not because it's ever affected by visual_seed_policy.
+    print(f"visual seed policy:  {plan.visual_seed_policy}")
+    print(f"fight base visual seed: {plan.fight_base_visual_seed}")
     print(f"expected ComfyUI job count: {plan.expected_comfyui_job_count} "
           f"({plan.shot_count} FLUX + {plan.shot_count} Wan)")
     print(f"expected assembled duration: ~{plan.expected_assembled_duration_seconds:.3f}s")
@@ -206,9 +254,22 @@ def _write_manifest(manifest_path: str, plan: MultiShotPlan, result) -> None:
     never requires ComfyUI-specific fields in any generic model; every
     field here is sourced from the plan/result's own already-generic
     Pydantic fields."""
+    scene = plan.shots[0].scene  # identical across every selected shot — see prompt_generator.py
     manifest = {
         "fight_id": plan.fight_id,
         "selected_shot_indices": plan.selected_shot_indices,
+        # Sprint 4 Prompt 12: canonical, fight-level visual continuity
+        # evidence — recorded once (not per shot) since it's identical
+        # across every selected shot by construction, not because it
+        # was arbitrarily deduplicated for this manifest.
+        "canonical_visuals": {
+            "white_fighter": scene.white_fighter.model_dump(),
+            "black_fighter": scene.black_fighter.model_dump(),
+            "arena": scene.arena.model_dump(),
+            "cinematic_art_style": scene.cinematic_art_style,
+        },
+        "visual_seed_policy": plan.visual_seed_policy,
+        "fight_base_visual_seed": plan.fight_base_visual_seed,
         "shots": [
             {
                 "timeline_index": idx,
@@ -217,13 +278,29 @@ def _write_manifest(manifest_path: str, plan: MultiShotPlan, result) -> None:
                 "original_duration_seconds": shot.duration_seconds,
                 "effective_animation_duration_seconds": eff_dur,
                 "resolved_wan_frame_count": frames,
+                # Sprint 4 Prompt 12.1: distinguished explicitly.
+                # planned_flux_seed comes from plan.resolved_flux_seeds
+                # (computed during prepare(), zero ComfyUI calls).
+                # actual_flux_seed comes from result.actual_flux_seeds
+                # — RenderPipeline's own real, provider-reported
+                # RenderedFrame.metadata.generation_seed, never
+                # re-derived from the prompt here. execute() itself
+                # already verifies these agree (raising
+                # SeedEvidenceMismatchError before any Wan call
+                # otherwise, under a non-default policy) — both are
+                # still recorded, so a successful manifest is itself
+                # the evidence that they did.
+                "planned_flux_seed": planned_flux_seed,
+                "actual_flux_seed": actual_flux_seed,
+                "wan_seed": wan_seed,
                 "image_prompt": shot.image_prompt,
                 "flux_keyframe_path": image_path,
                 "animation_clip_path": video_path,
             }
-            for idx, shot, eff_dur, frames, image_path, video_path in zip(
+            for idx, shot, eff_dur, frames, planned_flux_seed, actual_flux_seed, wan_seed, image_path, video_path in zip(
                 plan.selected_shot_indices, plan.shots, plan.effective_animation_durations_seconds,
-                plan.calculated_wan_frame_counts, result.image_paths, result.video_paths, strict=True,
+                plan.calculated_wan_frame_counts, plan.resolved_flux_seeds, result.actual_flux_seeds,
+                plan.resolved_wan_seeds, result.image_paths, result.video_paths, strict=True,
             )
         ],
         "resolved_image_width": result.resolved_image_width,
@@ -246,7 +323,28 @@ async def _main() -> int:
 
     settings = get_settings()
     ai_provider = get_ai_provider()
-    runner = MultiShotAcceptanceRunner(ai_provider)
+
+    # Sprint 4 Prompt 12: only construct a custom RenderPipeline (with
+    # a seed_override-configured ComfyUIImageProvider registered as
+    # "comfyui") when a non-default visual seed policy is actually
+    # requested — the default policy leaves the runner's own default
+    # RenderPipeline() completely untouched, exactly matching
+    # pre-Prompt-12 behavior. base_visual_seed is computed here (for
+    # constructing the provider) and, separately, again inside
+    # runner.prepare() below (for the plan's own display fields) —
+    # both calls are the same pure, deterministic function of the same
+    # (pgn, style, battle_mode) inputs, so they cannot drift apart.
+    visual_seed_policy = VisualSeedPolicy(args.visual_seed_policy)
+    if visual_seed_policy != VisualSeedPolicy.DEFAULT:
+        base_visual_seed = derive_fight_base_visual_seed(pgn, args.style, args.battle_mode)
+        seed_override = build_seed_override(visual_seed_policy, base_visual_seed)
+        image_registry = ImageProviderRegistry()
+        image_registry.register("mock", MockImageProvider)
+        image_registry.register("comfyui", lambda: ComfyUIImageProvider(seed_override=seed_override))
+        render_pipeline = RenderPipeline(image_router=ImageRouter(registry=image_registry))
+        runner = MultiShotAcceptanceRunner(ai_provider, render_pipeline=render_pipeline)
+    else:
+        runner = MultiShotAcceptanceRunner(ai_provider)
 
     preferences = BattlePreferences(battle_mode=BattleMode(args.battle_mode), style=args.style)
 
@@ -265,6 +363,7 @@ async def _main() -> int:
             pgn, preferences, start_shot_index=args.start_shot_index, shot_count=args.shot_count,
             fps=args.fps, max_animation_seconds=resolved_max_animation_seconds,
             allow_exceeding_default_cap=args.allow_more_than_cap,
+            visual_seed_policy=visual_seed_policy,
         )
     except (ShotRangeOutOfRangeError, ShotCountExceedsAcceptanceCapError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

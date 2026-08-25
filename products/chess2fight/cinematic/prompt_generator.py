@@ -33,6 +33,7 @@ the exact same PromptedTimeline. No randomness, no AI calls.
 
 from __future__ import annotations
 
+from products.chess2fight.cinematic.prompt_composer import compose_prompt_from_blocks
 from products.chess2fight.cinematic.schemas import (
     CameraAngle,
     CameraMotion,
@@ -159,28 +160,79 @@ def _lighting_clause(shot: EnrichedShot) -> str:
     return f"{shot.lighting}; {shot.scene.lighting_continuity}"
 
 
-def _build_prompt(shot: EnrichedShot) -> str:
-    """Assembles the complete text-to-image prompt for one shot,
-    covering every required element: character appearance, clothing,
-    weapons (all three via `_character_clause`), environment, action,
-    camera angle, camera movement, composition, lighting, mood,
-    cinematic style, and quality modifiers.
+def _stable_continuity_block(shot: EnrichedShot) -> list[str]:
+    """Fragments that must read identically for every shot sharing the
+    same fight — fighter identity (hair, facial features, clothing,
+    armor, weapon, for both fighters) and the persistent
+    environment/arena description. Verified directly against
+    scene_composer.py's own source, not assumed: `compose_scene()`
+    builds exactly one `SceneContinuity` per fight (one
+    `_fighter_appearance()` call per fighter, both outside any
+    per-shot loop) and assigns that same object to every shot's
+    `.scene` — so `shot.scene.white_fighter`/`.black_fighter` are the
+    literal same object across every shot in a timeline, not just
+    value-equal. Changing which fighter is prominent (`_character_clause`'s
+    own `prominent` framing) never alters this block's underlying
+    identity fragments, only their order/framing phrase — see
+    `_fighter_descriptor`'s own docstring for why.
     """
-    angle_phrase, movement_phrase, composition_phrase = _camera_clause(shot)
+    return [_character_clause(shot), _environment_clause(shot)]
 
-    clauses = [
-        _character_clause(shot),
-        shot.description,
-        _environment_clause(shot),
-        angle_phrase,
-        movement_phrase,
-        composition_phrase,
-        _lighting_clause(shot),
-        f"{shot.mood} atmosphere",
-        shot.scene.cinematic_art_style,
-        _QUALITY_MODIFIERS,
-    ]
-    return ", ".join(clause.strip().rstrip(",") for clause in clauses if clause.strip())
+
+def _shot_action_block(shot: EnrichedShot) -> list[str]:
+    """The one fragment that's genuinely specific to this shot's own
+    moment in the fight — its narrative action/description. Never
+    reused verbatim across shots (each ShotType gets its own
+    description in timeline_engine.py's own plan construction)."""
+    return [shot.description]
+
+
+def _shot_camera_block(shot: EnrichedShot) -> list[str]:
+    """Fragments describing how this specific shot frames its
+    subject — angle, movement, composition, lighting, and mood. Some
+    of these (lighting, mood) blend a shot-specific value with a
+    fight-level continuity value (see `_lighting_clause`) — grouped
+    here because the shot-specific component is what actually varies
+    from one shot to the next; the stable component within them still
+    reads identically regardless."""
+    angle_phrase, movement_phrase, composition_phrase = _camera_clause(shot)
+    return [angle_phrase, movement_phrase, composition_phrase, _lighting_clause(shot), f"{shot.mood} atmosphere"]
+
+
+def _global_style_block(shot: EnrichedShot) -> list[str]:
+    """Fragments that apply uniformly to every shot in every fight of
+    this style — the fight's own art-style choice, plus the fixed,
+    genre-independent quality modifiers appended to every prompt this
+    module has ever produced."""
+    return [shot.scene.cinematic_art_style, _QUALITY_MODIFIERS]
+
+
+def _build_prompt(shot: EnrichedShot) -> str:
+    """Assembles the complete text-to-image prompt for one shot, as
+    four explicit, named blocks — Sprint 4 Prompt 12's composition
+    contract — rather than one flat, undifferentiated clause list:
+
+        [STABLE CONTINUITY BLOCK]
+        + [SHOT-SPECIFIC ACTION BLOCK]
+        + [SHOT-SPECIFIC CAMERA BLOCK]
+        + [GLOBAL STYLE BLOCK]
+
+    Joined via `compose_prompt_from_blocks` (not raw string
+    concatenation) — see that module for the specific defect this
+    replaces: the previous inline `", ".join(...rstrip(","))` only
+    stripped trailing commas, so a fragment that was itself a complete
+    sentence (`shot.description` and `_environment_clause`'s output
+    both can be, since they're built from freeform narrative text)
+    could produce a "sentence., next fragment" artifact — reproduced
+    and confirmed from the real three-shot GPU evidence before this
+    fix, not a hypothetical.
+    """
+    return compose_prompt_from_blocks(
+        _stable_continuity_block(shot),
+        _shot_action_block(shot),
+        _shot_camera_block(shot),
+        _global_style_block(shot),
+    )
 
 
 def generate_prompts(composed: ComposedTimeline) -> PromptedTimeline:

@@ -37,9 +37,11 @@ from products.chess2fight.rendering.asset_manager import AssetManager, FrameMeta
 
 
 def _derive_seed(prompt: str) -> int:
-    """Derives a deterministic "generation seed" from a prompt — see
-    FrameMetadata.generation_seed's docstring for what this value does
-    and doesn't control today."""
+    """Derives a deterministic "generation seed" from a prompt — used
+    as FrameMetadata.generation_seed's fallback when the actual
+    provider doesn't report one of its own (see that field's own
+    docstring, and this method's one remaining call site in
+    `_render_one_shot`, for the current, non-fallback case)."""
     return int(hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:8], 16)
 
 
@@ -150,6 +152,23 @@ class RenderPipeline:
         result = await self._image_router.generate_image(shot.image_prompt, **image_kwargs)
         saved_path = self._asset_manager.save_frame(fight_id, frame_number, result.image_path)
 
+        # Sprint 4 Prompt 12.1: use the actual seed the provider
+        # reports it used (ImageGenerationResult.metadata["seed"] —
+        # already a generic field on the generic result type, so this
+        # stays provider-agnostic; no concrete-provider import here)
+        # when one is available. Falls back to the deterministic
+        # prompt-derived value for a provider that doesn't report a
+        # seed at all (the default configured provider's own metadata
+        # carries no "seed" key, so this fallback is exactly what runs
+        # there — unchanged behavior). Correct even under a non-default
+        # seed policy: a configured provider's own seed_override can
+        # now correctly be recorded as the seed actually used, not a
+        # value re-derived from the prompt that could silently disagree
+        # with it.
+        generation_seed = result.metadata.get("seed")
+        if generation_seed is None:
+            generation_seed = _derive_seed(shot.image_prompt)
+
         metadata = FrameMetadata(
             frame_number=frame_number,
             prompt=shot.image_prompt,
@@ -159,6 +178,6 @@ class RenderPipeline:
             shot_type=shot.shot_type.value,
             source_moves=list(shot.source_moves),
             timestamp=datetime.now(timezone.utc).isoformat(),
-            generation_seed=_derive_seed(shot.image_prompt),
+            generation_seed=generation_seed,
         )
         return RenderedFrame(frame_number=frame_number, frame_path=str(saved_path), metadata=metadata)
