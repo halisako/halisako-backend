@@ -89,6 +89,15 @@ class AssetManager:
         """
         self._storage_root = Path(storage_root if storage_root is not None else settings.render_storage_root)
 
+    @property
+    def storage_root(self) -> Path:
+        """Sprint 4 Prompt 14 — the configured root directory, exposed
+        publicly so a caller can derive paths relative to it (e.g. an
+        isolated subdirectory outside `fight_directory()`'s own
+        `renders/` convention) without reaching into a private
+        attribute. Purely additive — no existing behavior changed."""
+        return self._storage_root
+
     def fight_directory(self, fight_id: str) -> Path:
         """Returns (creating if needed) the storage directory for one
         fight's rendered frames: `{storage_root}/renders/{fight_id}/`."""
