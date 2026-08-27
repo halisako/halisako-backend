@@ -97,6 +97,13 @@ def _parse_args() -> argparse.Namespace:
         "Prompt 15.1 shot.",
     )
     parser.add_argument(
+        "--methods", type=str, default=",".join(CANDIDATE_METHODS),
+        help="Comma-separated list of reference_latents_method candidates to generate, one ComfyUI job "
+        f"each. Default: '{','.join(CANDIDATE_METHODS)}' — Prompt 16's original three-method sweep, "
+        "unchanged. Pass a single value (e.g. 'offset') for a one-job, single-method validation run "
+        "(Sprint 4 Prompt 17).",
+    )
+    parser.add_argument(
         "--control-image", type=str, default=None,
         help="Optional path to the already-paid Prompt 15.1 shot-2 output, for manifest evidence only — "
         "never read for validation, never regenerated.",
@@ -207,6 +214,18 @@ async def _main() -> int:
 
     preferences = BattlePreferences(battle_mode=BattleMode(args.battle_mode), style=args.style)
 
+    requested_methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    if not requested_methods:
+        print("ERROR: --methods must name at least one method.", file=sys.stderr)
+        return 1
+    unknown_methods = [m for m in requested_methods if m not in CANDIDATE_METHODS]
+    if unknown_methods:
+        print(
+            f"ERROR: unknown method(s) {unknown_methods} — supported: {list(CANDIDATE_METHODS)}.",
+            file=sys.stderr,
+        )
+        return 1
+
     control_image_sha256 = None
     if args.control_image is not None:
         # Read only for a SHA256, purely for manifest evidence — never
@@ -223,6 +242,7 @@ async def _main() -> int:
             pgn, preferences, anchor_path=args.anchor_path, anchor_original_seed=args.anchor_original_seed,
             seed=args.seed, style=args.style, battle_mode=args.battle_mode, timeline_index=args.timeline_index,
             control_image_path=args.control_image, control_image_sha256=control_image_sha256,
+            candidate_methods=tuple(requested_methods),
         )
     except AnchorValidationError as exc:
         print(f"ERROR: anchor validation failed — {exc}", file=sys.stderr)
@@ -257,7 +277,7 @@ async def _main() -> int:
                 print(f"  - {problem}", file=sys.stderr)
             return 1
 
-        for candidate_path in [method_workflow_path(m) for m in CANDIDATE_METHODS]:
+        for candidate_path in [method_workflow_path(m) for m in requested_methods]:
             if not Path(candidate_path).exists():
                 print(f"\nPreflight check failed: experimental workflow file not found: {candidate_path}", file=sys.stderr)
                 return 1
@@ -271,7 +291,7 @@ async def _main() -> int:
                 print(f"  - {problem}", file=sys.stderr)
             return 1
 
-        method_problems = await check_reference_method_node_availability(settings, list(CANDIDATE_METHODS))
+        method_problems = await check_reference_method_node_availability(settings, requested_methods)
         if method_problems:
             print("\nPreflight check failed — refusing to start generation:", file=sys.stderr)
             for problem in method_problems:
