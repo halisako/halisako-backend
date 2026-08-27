@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image
@@ -74,6 +75,92 @@ class AnchorValidationError(RuntimeError):
     validation failure" requirement. This calibration harness never
     generates an anchor itself; this is the only validation an anchor
     ever receives here."""
+
+
+class UnplannedPromptError(ValueError):
+    """Raised by a plan-bound seed_override callable (built by
+    `build_plan_seed_override`) when asked to resolve a seed for a
+    prompt that isn't in the plan at all — Sprint 4 Prompt 15.1's own
+    "fail loudly for an unknown/unplanned prompt" requirement. Since
+    `ComfyUIImageProvider._resolve_seed` calls `seed_override(prompt)`
+    with the exact prompt it's about to submit, this fires before any
+    network request — the callable itself is pure, no I/O."""
+
+
+class AmbiguousPlannedSeedError(ValueError):
+    """Raised by `build_plan_seed_override` itself, at construction
+    time (before any generation call, not lazily inside the returned
+    callable) if the same prompt text maps to two different planned
+    seeds within the same plan — an internally inconsistent plan that
+    must never be used for a real run. Sprint 4 Prompt 15.1's own
+    explicit "detect an ambiguous case... and fail before paid
+    generation" requirement — checked once, eagerly, at build time,
+    not per-call."""
+
+
+def build_plan_seed_override(plan: ReferenceSeedCalibrationPlan) -> Callable[[str], int]:
+    """Sprint 4 Prompt 15.1 — builds a strict `prompt -> planned seed`
+    resolver directly from a `ReferenceSeedCalibrationPlan`, for
+    wiring into `ComfyUIImageProvider(seed_override=...)`.
+
+    Root cause this fixes: Sprint 4 Prompt 15's CLI correctly computed
+    `plan.shots[i].planned_flux_seed` (via `explicit_seeds`, when
+    given) but then unconditionally constructed the REAL provider's
+    `seed_override` via `build_seed_override(VisualSeedPolicy.DERIVED,
+    plan.fight_base_visual_seed)` — which re-derives a seed from
+    whatever prompt is actually submitted, via `derive_shot_seed`,
+    completely ignoring the plan's own pinned values. Confirmed
+    directly (not assumed): for Prompt 15's own new prompt wording,
+    that old wiring would have resolved 1222993584/3013132441 — not
+    the pinned 2727023522/981216397 — meaning a real GPU run would
+    have submitted the wrong seed to ComfyUI's `RandomNoise` node
+    while the manifest/plan still claimed the pinned values, a genuine
+    live-path blocker, not a display-only issue.
+
+    Does NOT modify `derive_shot_seed`, `derive_fight_base_visual_seed`,
+    `build_seed_override`, or `ComfyUIImageProvider`'s public API at
+    all — this is a new, separate, pure function, deliberately kept in
+    this calibration-specific module (not `visual_continuity.py`,
+    which holds the generic, reusable seed-policy helpers this task
+    explicitly says not to touch).
+
+    Args:
+        plan: A plan from `prepare()` — typically one built with
+            `explicit_seeds` set, though this function itself has no
+            opinion on how `plan.shots[i].planned_flux_seed` was
+            computed; it only maps each shot's own `prompt` to its own
+            `planned_flux_seed`, whatever way that value arose.
+
+    Returns:
+        A callable satisfying `ComfyUIImageProvider`'s own
+        `seed_override: Callable[[str], int]` contract: given a
+        prompt, returns the exact planned seed for it.
+
+    Raises:
+        AmbiguousPlannedSeedError: If the same prompt text appears
+            more than once in `plan.shots` with two different planned
+            seeds — raised here, at build time, before any generation
+            call, never lazily inside the returned callable.
+    """
+    prompt_to_seed: dict[str, int] = {}
+    for shot in plan.shots:
+        if shot.prompt in prompt_to_seed and prompt_to_seed[shot.prompt] != shot.planned_flux_seed:
+            raise AmbiguousPlannedSeedError(
+                f"Prompt {shot.prompt!r} maps to two different planned seeds within this plan: "
+                f"{prompt_to_seed[shot.prompt]} and {shot.planned_flux_seed} — refusing to build an "
+                "ambiguous seed resolver before any paid generation."
+            )
+        prompt_to_seed[shot.prompt] = shot.planned_flux_seed
+
+    def _resolve_planned_seed(prompt: str) -> int:
+        if prompt not in prompt_to_seed:
+            raise UnplannedPromptError(
+                f"No planned seed exists for this prompt in the calibration plan — refusing to submit an "
+                f"unplanned generation. Prompt: {prompt!r}"
+            )
+        return prompt_to_seed[prompt]
+
+    return _resolve_planned_seed
 
 
 def _sha256_of_file(path: str) -> str:
@@ -163,8 +250,9 @@ class ReferenceSeedCalibrationRunner:
         style: str,
         battle_mode: str,
         shot_indices: tuple[int, int] = (1, 2),
+        explicit_seeds: tuple[int, int] | None = None,
     ) -> ReferenceSeedCalibrationPlan:
-        """Validates the supplied anchor and plans both shots' derived
+        """Validates the supplied anchor and plans both shots' FLUX
         seeds. Makes ComfyUI/network calls for none of this — only
         local file reads (the anchor) and the real, local
         FightOrchestrator/PGN-analysis pipeline (no network either).
@@ -181,7 +269,25 @@ class ReferenceSeedCalibrationRunner:
             battle_mode: Same reasoning as `style`.
             shot_indices: Which two timeline shots to reference-
                 condition. Defaults to (1, 2) — the same two shots the
-                live Prompt 13.1 GPU run reference-conditioned.
+                live Prompt 13.1/14 GPU runs reference-conditioned.
+            explicit_seeds: Sprint 4 Prompt 15 — when given, pins each
+                shot's `planned_flux_seed` to these exact values
+                instead of deriving them from the (now-different, per
+                Prompt 15) prompt text via `derive_shot_seed`. Exists
+                specifically for a prompt-wording-only calibration:
+                `derive_shot_seed(base_seed, prompt)` is a hash of the
+                exact prompt string, so changing the prompt text (this
+                task's entire point) would otherwise silently also
+                change the seed — introducing a second, uncontrolled
+                variable into what must be a single-variable
+                experiment. `derive_shot_seed` and
+                `derive_fight_base_visual_seed` themselves are
+                completely unmodified by this parameter (verified
+                directly: neither function is called differently, and
+                Prompt 14's own default behavior — no override,
+                `None` — is byte-for-byte unchanged) — this is an
+                opt-in override at the plan-construction boundary, not
+                a change to the seed-derivation mechanism itself.
 
         Returns:
             A ReferenceSeedCalibrationPlan.
@@ -202,12 +308,16 @@ class ReferenceSeedCalibrationRunner:
 
         base_seed = derive_fight_base_visual_seed(pgn, style, battle_mode)
         shot_plans = []
-        for idx, shot in zip(shot_indices, selected_shots, strict=True):
-            # Sprint 4 Prompt 13's own unchanged reference-edit prompt
-            # composition — this experiment isolates the seed variable
-            # only; the prompt wording is deliberately untouched.
+        for position, (idx, shot) in enumerate(zip(shot_indices, selected_shots, strict=True)):
+            # Sprint 4 Prompt 13's own reference-edit prompt
+            # composition — Prompt 15 changes its wording (see that
+            # module's own Prompt 15 docstring), but the call site and
+            # mechanism here are exactly as Prompt 13/14 established.
             prompt = compose_reference_edit_prompt(shot)
-            planned_seed = derive_shot_seed(base_seed, prompt)
+            if explicit_seeds is not None:
+                planned_seed = explicit_seeds[position]
+            else:
+                planned_seed = derive_shot_seed(base_seed, prompt)
             shot_plans.append(
                 CalibrationShotPlan(
                     timeline_index=idx, shot_id=shot.shot_id, prompt=prompt, planned_flux_seed=planned_seed,

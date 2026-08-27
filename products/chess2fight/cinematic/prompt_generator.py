@@ -272,7 +272,7 @@ def _canonical_fighter_descriptor(fighter: FighterAppearance, label: str) -> str
     contract. This function reproduces the same underlying identity
     text (same fields, same wording) without that wrapper, and without
     creating any new fighter description or field — reusing
-    `FighterAppearance`'s existing fields directly, per this task's
+    `FighterAppearance`'s existing fields directly, per that task's
     own explicit instruction.
 
     `label` ("Fighter A" / "Fighter B" below) is caller-supplied and
@@ -281,10 +281,92 @@ def _canonical_fighter_descriptor(fighter: FighterAppearance, label: str) -> str
     same two fighters always produces the same two descriptions in the
     same order, regardless of which fighter the shot happens to focus
     on.
+
+    Sprint 4 Prompt 15: the weapon clause is now explicit,
+    general-purpose anti-duplication/anti-transformation language,
+    reusing `fighter.weapon`'s own text verbatim (never hardcoded to
+    any specific weapon name — this function has no idea whether
+    `fighter.weapon` says "a dragon halberd" or "twin daggers" or
+    anything else, and doesn't need to: the same wording applies
+    regardless of count or design, since "duplicate," "additional
+    fragment," and "transform" are all count-and-shape-agnostic
+    failure modes to rule out). Motivated by real GPU evidence (Sprint
+    4 Prompt 14's own live run): per-shot derived seeds unlocked pose/
+    composition diversity as intended, but also let a single-weapon
+    fighter's dragon halberd acquire an extra weapon-head fragment in
+    one shot and mutate into a hybrid duplicated weapon with an
+    additional spear-like shaft in the other — the prior wording
+    ("wielding a {weapon}") named the weapon without ever telling the
+    editing model what specifically must NOT happen to it.
+
+    Sprint 4 Prompt 15.1: two corrections to that Prompt 15 wording,
+    found on audit of the actual delivered file, not GPU evidence this
+    time:
+
+    1. The weapon clause named specific morphology ("same shaft/blade,
+       same head, same spikes") — correct wording for a halberd/blade,
+       nonsensical for Halisako's other real weapon/equipment
+       vocabulary (an assault rifle has no "head"; a drone swarm has
+       no "shaft"; "an unarmed stance" — `scene_composer.py`'s own
+       documented fallback — has neither). Replaced with
+       `_weapon_identity_clause`, a dedicated, fully generic helper
+       (see its own docstring) that treats `fighter.weapon`'s text as
+       opaque data, never grammar, and names zero physical components.
+    2. "same expression ({facial_features})" asked the model to freeze
+       an exact facial expression — but `facial_features` values in
+       Halisako's real vocabulary include things that aren't
+       expressions at all ("a sharp jawline with a faint scar", "faint
+       bio-luminescent markings", "camouflage face paint"), and
+       cinematic action should be free to vary expression while
+       keeping the character's identity fixed. Replaced with "same
+       facial identity and distinctive facial features
+       ({facial_features})" — identity is immutable, performance is
+       not.
     """
     return (
-        f"{label}: {fighter.hair}, {fighter.facial_features}, wearing {fighter.clothing} and "
-        f"{fighter.armor}, wielding a {fighter.weapon}"
+        f"{label}: same face, same facial identity and distinctive facial features "
+        f"({fighter.facial_features}), same hair ({fighter.hair}), wearing the same outfit "
+        f"({fighter.clothing}) and same armor ({fighter.armor}). {_weapon_identity_clause(fighter.weapon)}."
+    )
+
+
+def _weapon_identity_clause(weapon_description: str) -> str:
+    """Sprint 4 Prompt 15.1 — a fully generic weapon/equipment
+    identity-preservation clause, for any `FighterAppearance.weapon`
+    value whatsoever.
+
+    Deliberately names zero physical weapon components (no "blade",
+    "shaft", "head", "spikes", "barrel", or similar) — Prompt 15's own
+    first version of this language was specific to polearms/bladed
+    weapons, which doesn't generalize to Halisako's actual real
+    weapon/equipment vocabulary: firearms ("assault rifle", "sniper
+    rifle"), non-weapon equipment ("ballistic shield", "breaching
+    charge", "reinforced gauntlets", "impact-resistant armor",
+    "fortified cover position"), non-physical concepts ("drone swarm",
+    "energy shield", "deflector barrier"), and `scene_composer.py`'s
+    own documented no-weapon fallback ("an unarmed stance").
+
+    `weapon_description` is used strictly as DATA — quoted verbatim,
+    never grammatically integrated into a sentence that would need an
+    article ("a"/"an") chosen to match it. This is what makes the
+    output correct for "an unarmed stance" without ever producing "the
+    an unarmed stance": the value is never preceded by an
+    article-requiring word at all, only introduced via `described as
+    "..."`.
+
+    No morphology, no count assumption, no weapon-family assumption —
+    the same wording applies unchanged whether `weapon_description` is
+    singular, plural, a physical object, a non-physical concept, or
+    the explicit absence of a weapon.
+    """
+    return (
+        f'weapon/equipment state: preserve exactly the state described as "{weapon_description}" as '
+        "shown in the reference — same count/multiplicity as shown in the reference, same type/category, "
+        "same silhouette/topology, same proportions, same distinctive visual details, same "
+        "materials/colors, same overall recognizable design. Do not add, remove, duplicate, merge, "
+        "split, substitute, redesign, mutate, or transform this weapon/equipment item or any part of "
+        "it. Do not invent any additional weapon/equipment object, copy, component, attachment, or "
+        "fragment"
     )
 
 
@@ -319,19 +401,33 @@ def compose_reference_edit_prompt(shot: EnrichedShot) -> str:
     (unaffected by this fix — it was never part of the identity
     contradiction) for the same never-drift guarantee Prompt 13
     established.
+
+    Sprint 4 Prompt 15: CHANGE ONLY's own fragment list is now more
+    explicit about what pose freedom actually means (body pose, limb
+    pose, body orientation, spacing between fighters — not just
+    "prominence and placement") — a single experimental variable
+    change (prompt wording only): identity/equipment strength
+    increased in PRESERVE (see `_canonical_fighter_descriptor`'s own
+    docstring), while deliberately NOT asking the model to preserve
+    exact body pose or composition, which would undo Prompt 14's own
+    already-proven composition-diversity result. `shot.description`
+    (the shot's own action text) and `_camera_clause`'s three phrases
+    are unchanged, same call sites as before — this task's own
+    explicit "do not change the shot action text" and "camera/framing
+    instructions must remain present" requirements.
     """
     scene = shot.scene
     preserve_fragments = [
-        "Preserve exactly from the reference image:",
+        "PRESERVE EXACTLY from the reference image:",
         _canonical_fighter_descriptor(scene.white_fighter, "Fighter A"),
         _canonical_fighter_descriptor(scene.black_fighter, "Fighter B"),
-        "do not change face, hairstyle, clothing, armor, or exact weapon design for either fighter",
-        f"preserve the {scene.cinematic_art_style} art style",
+        f"preserve the {scene.cinematic_art_style} art style and color palette",
         f"preserve the {scene.arena.layout} and its environment identity",
     ]
     angle_phrase, movement_phrase, composition_phrase = _camera_clause(shot)
     change_fragments = [
-        f"Change only: {shot.description}",
+        f"CHANGE ONLY: {shot.description}",
+        "body pose, limb pose, body orientation, and spacing between the two fighters",
         "fighter prominence and foreground/background placement for this shot",
         angle_phrase,
         movement_phrase,

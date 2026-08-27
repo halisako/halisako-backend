@@ -52,6 +52,7 @@ from products.chess2fight.rendering.reference_seed_calibration import (  # noqa:
     AnchorValidationError,
     ReferenceSeedCalibrationPlan,
     ReferenceSeedCalibrationRunner,
+    build_plan_seed_override,
 )
 from products.chess2fight.rendering.visual_continuity import VisualSeedPolicy, build_seed_override  # noqa: E402
 from products.chess2fight.schemas import BattleMode, BattlePreferences  # noqa: E402
@@ -84,7 +85,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shot-indices", type=str, default="1,2",
         help="Comma-separated pair of timeline shot indices to reference-condition. Default: 1,2 — the "
-        "same two shots the live Prompt 13.1 GPU run reference-conditioned.",
+        "same two shots the live Prompt 13.1/14 GPU runs reference-conditioned.",
+    )
+    parser.add_argument(
+        "--explicit-seeds", type=str, default=None,
+        help="Sprint 4 Prompt 15 — comma-separated pair of FLUX seeds to pin each shot to, instead of "
+        "deriving them from this run's own prompt text. For a prompt-wording-only calibration against a "
+        "prior run's exact seeds (e.g. '2727023522,981216397' to reproduce Prompt 14's own seeds "
+        "while testing new prompt wording) — without this, seeds derive normally from the prompt "
+        "actually used, exactly as Prompt 14 already does.",
     )
     parser.add_argument("--style", type=str, default="anime", help="Visual/narrative style. Default: anime.")
     parser.add_argument(
@@ -180,6 +189,17 @@ async def _main() -> int:
         print(f"ERROR: --shot-indices must be two comma-separated integers, e.g. '1,2' ({exc}).", file=sys.stderr)
         return 1
 
+    explicit_seeds = None
+    if args.explicit_seeds is not None:
+        try:
+            seed_parts = [int(x.strip()) for x in args.explicit_seeds.split(",")]
+            if len(seed_parts) != 2:
+                raise ValueError("exactly two comma-separated seeds are required")
+            explicit_seeds = (seed_parts[0], seed_parts[1])
+        except ValueError as exc:
+            print(f"ERROR: --explicit-seeds must be two comma-separated integers, e.g. '2727023522,981216397' ({exc}).", file=sys.stderr)
+            return 1
+
     settings = get_settings()
     ai_provider = get_ai_provider()
     runner = ReferenceSeedCalibrationRunner(ai_provider)
@@ -190,6 +210,7 @@ async def _main() -> int:
         plan = await runner.prepare(
             pgn, preferences, anchor_path=args.anchor_path, anchor_original_seed=args.anchor_original_seed,
             style=args.style, battle_mode=args.battle_mode, shot_indices=shot_indices,
+            explicit_seeds=explicit_seeds,
         )
     except AnchorValidationError as exc:
         print(f"ERROR: anchor validation failed — {exc}", file=sys.stderr)
@@ -235,12 +256,25 @@ async def _main() -> int:
                 print(f"  - {problem}", file=sys.stderr)
             return 1
 
-    # Sprint 4 Prompt 14: DERIVED policy only — this experiment
-    # specifically isolates shared-seed vs. per-shot-derived-seed;
-    # SHARED is what the live Prompt 13.1 run already used. Reuses
-    # build_seed_override directly (not a hand-written lambda) — "do
-    # not duplicate seed logic."
-    seed_override = build_seed_override(VisualSeedPolicy.DERIVED, plan.fight_base_visual_seed)
+    # Sprint 4 Prompt 15.1 fix: when --explicit-seeds was supplied,
+    # the REAL provider must resolve exactly the pinned seeds the plan
+    # already claims — not re-derive from whatever prompt text this
+    # run's own compose_reference_edit_prompt() happens to produce.
+    # build_seed_override(DERIVED, ...) hashes (base_seed, prompt),
+    # ignoring plan.shots[i].planned_flux_seed entirely; a prior
+    # version of this script always used that path regardless of
+    # --explicit-seeds, meaning a real GPU run would submit a
+    # different seed than the one the plan/manifest claimed (confirmed
+    # directly: for Prompt 15's own prompt wording, that would have
+    # been 1222993584/3013132441, not the pinned 2727023522/981216397)
+    # — a genuine live-path bug, not a display-only one.
+    if explicit_seeds is not None:
+        seed_override = build_plan_seed_override(plan)
+    else:
+        # Sprint 4 Prompt 14's own DERIVED policy, unchanged — this
+        # experiment's default (no pinning requested) still isolates
+        # shared-seed vs. per-shot-derived-seed exactly as before.
+        seed_override = build_seed_override(VisualSeedPolicy.DERIVED, plan.fight_base_visual_seed)
     reference_provider = ComfyUIImageProvider(seed_override=seed_override)
 
     print(f"\nGenerating {plan.expected_comfyui_jobs} reference-conditioned shots (0 T2I, 0 Wan)...")
