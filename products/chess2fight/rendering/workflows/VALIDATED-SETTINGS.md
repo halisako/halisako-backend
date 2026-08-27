@@ -593,3 +593,23 @@ Generation-count contract: 1 T2I anchor + 2 reference-conditioned FLUX
 + 3 Wan = 6 ComfyUI jobs, 1 local concatenation — identical to Prompt
 11/12's own contract. No new model files required — same distilled 4B
 stack as the T2I workflow.
+
+## Reference-latent method sweep (Sprint 4 Prompt 16)
+
+Following the Prompt 15.1 live GPU result (character identity strong,
+but timeline shot 2 still produced a duplicated diagonal spear/polearm
+alongside the correct dragon-headed halberd — RGB SSIM anchor→shot1
+0.951, anchor→shot2 0.799, shot1→shot2 0.813), this experiment isolates
+`reference_latents_method` for that one shot only. The production
+workflow implicitly uses ComfyUI's own current FLUX.2 default,
+`"index"` — confirmed via research, not assumed — so Prompt 13 through
+15.1's entire live history is the "index" control. Three new,
+experimental-only workflow files add `FluxKontextMultiReferenceLatentMethod`
+on both conditioning branches (see
+`workflows/README-reference-method-sweep.md`): `offset`, `uxo/uno`,
+`index_timestep_zero`. The production `flux2_klein_reference_4b.json`
+is verified byte-for-byte unchanged (checksum confirmed in this
+prompt's own test suite). Not yet run on real hardware — the next paid
+run is exactly 3 ComfyUI jobs (one per candidate), reusing the same
+anchor, prompt, and seed (981216397) as the already-paid Prompt 15.1
+shot-2 result, which is never regenerated.

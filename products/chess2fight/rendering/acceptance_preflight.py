@@ -339,3 +339,82 @@ async def preflight_check(settings, check_reference_workflow: bool = False) -> t
                 )
 
     return problems, warnings
+
+
+async def check_reference_method_node_availability(settings, candidate_methods: list[str]) -> list[str]:
+    """Sprint 4 Prompt 16 — a dedicated, additional preflight check for
+    the reference-latent method sweep experiment: confirms
+    `FluxKontextMultiReferenceLatentMethod` is available on the live
+    ComfyUI installation, and — when the `/object_info` response
+    exposes the node's combo choices — that every value in
+    `candidate_methods` is actually a supported choice.
+
+    Kept separate from `preflight_check` (not another
+    `check_*_workflow`-style flag on that function) since this check
+    is specific to this one experiment's own new node, not a general
+    reference-conditioning concern every reference-conditioned caller
+    needs — `preflight_check(settings, check_reference_workflow=True)`
+    remains the right call for the base checks (workflow files,
+    ReferenceLatent, VAEEncode, model visibility), and this function is
+    called in addition, only by this experiment's own CLI.
+
+    Same strictness policy as the Prompt 13.1 ReferenceLatent/VAEEncode
+    check this mirrors: any failure to confirm here is always a hard
+    problem, never a warning — an unsupported or missing method choice
+    means the paid job cannot possibly succeed as configured.
+
+    Args:
+        candidate_methods: The `reference_latents_method` values this
+            run intends to submit (e.g. `["offset", "uxo/uno",
+            "index_timestep_zero"]`) — checked against the live node's
+            own advertised choices, when available.
+
+    Returns:
+        A list of problem strings — empty means the node (and, where
+        checkable, every candidate value) is confirmed available.
+    """
+    problems: list[str] = []
+    base_url = settings.comfyui_base_url.rstrip("/")
+    node_type = "FluxKontextMultiReferenceLatentMethod"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{base_url}/object_info/{node_type}")
+            response.raise_for_status()
+            info = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return [
+            f"Could not confirm the {node_type!r} node is available on this ComfyUI installation "
+            f"({exc}) — required for the reference-latent method sweep. Update ComfyUI or confirm this "
+            "node is registered before spending GPU time on any candidate."
+        ]
+
+    if node_type not in info:
+        return [
+            f"{node_type!r} node not found via /object_info/{node_type} on this ComfyUI installation — "
+            "required for the reference-latent method sweep. This node may be missing from an outdated "
+            "ComfyUI install; update before running this experiment."
+        ]
+
+    # When the response exposes the combo's own advertised choices,
+    # verify every candidate is actually one of them. Structure follows
+    # the same /object_info combo-input shape the model-visibility
+    # check above already parses (a [choices_list, {}] pair) — if this
+    # specific response doesn't expose it the same way, this check is
+    # skipped rather than guessed at, same "don't overclaim uncertain
+    # parsing" caution as the rest of this module.
+    try:
+        method_input_spec = info[node_type]["input"]["required"]["reference_latents_method"]
+        available_choices = method_input_spec[0]
+        if isinstance(available_choices, list):
+            for candidate in candidate_methods:
+                if candidate not in available_choices:
+                    problems.append(
+                        f"Candidate method {candidate!r} is not among this ComfyUI installation's own "
+                        f"advertised choices for {node_type!r} ({available_choices}) — refusing to submit "
+                        "an unsupported candidate."
+                    )
+    except (KeyError, IndexError, TypeError):
+        pass  # combo shape not parseable this way — proceed without this specific sub-check
+
+    return problems
