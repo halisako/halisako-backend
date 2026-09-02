@@ -665,3 +665,37 @@ is what's been validated, not a complete rendered fight.
 canonical T2I anchor + two derived-seed FLUX offset reference shots +
 Wan I2V for all three shots + VideoBuilder concatenation. See this
 prompt's own deliverable report for the exact contract.
+
+## Reference-continuity seed planning hotfix
+
+A real production run (canonical T2I anchor + 2 offset reference
+shots) executed all 3 FLUX jobs on real hardware, then reported a seed
+mismatch for shot 1 — but ComfyUI history showed shot 2 had already
+been submitted and generated too, meaning the mismatch check was
+running as a late batch, after all paid work was already done, not
+per-shot as generation happened.
+
+Root cause (confirmed by exact match against real ComfyUI history —
+not assumed): `ReferenceContinuityAcceptanceRunner.prepare()` planned
+every shot's FLUX seed from `shot.image_prompt`, via the delegated
+`MultiShotAcceptanceRunner.prepare()` (which predates reference-
+conditioning entirely and has no awareness of it). But `execute()`
+actually submits `compose_reference_edit_prompt(shot)` for every
+reference-conditioned shot — a different string, hashing to a
+different seed under DERIVED (and DEFAULT) policy. Under SHARED
+policy this never mattered, which is exactly why it was never caught
+before a real paid run: every pre-existing automated test used
+SHARED, the runner's own default.
+
+Fixed: `prepare()` now re-plans every shot after the anchor using the
+exact prompt `execute()` will actually submit for it. Verified this
+produces the exact three seeds real GPU history reported for the
+sample fight under DERIVED policy: anchor 1970824880, shot 1
+1918080141, shot 2 104965515.
+
+Hardened separately: the planned-vs-actual seed check now runs
+immediately after each individual FLUX generation (anchor, then shot
+1, then shot 2), not once as a batch after all three — a mismatch on
+any one shot now stops before the next paid FLUX or Wan job is ever
+submitted. The batch check is retained as defense in depth but is no
+longer load-bearing.

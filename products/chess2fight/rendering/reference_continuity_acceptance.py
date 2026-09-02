@@ -52,6 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.exceptions import ImageProviderError
 from core.image_providers.comfyui import ComfyUIImageProvider
+from core.image_providers.comfyui import _derive_seed as _derive_flux_seed
 from products.chess2fight.cinematic.prompt_generator import compose_reference_edit_prompt
 from products.chess2fight.cinematic.schemas import ArenaContinuity, FighterAppearance, PromptedShot, PromptedTimeline
 from products.chess2fight.rendering.asset_manager import AssetManager, FrameMetadata, RenderManifest
@@ -184,12 +185,14 @@ class ReferenceContinuityAcceptanceRunner:
         visual_seed_policy=None,
         allow_exceeding_default_cap: bool = False,
     ) -> MultiShotPlan:
-        """Identical to `MultiShotAcceptanceRunner.prepare()` — shot
-        selection, duration capping, and FLUX seed resolution are
-        exactly the same regardless of whether shots 1/2 end up
-        independently generated or reference-conditioned; the
-        distinction only matters at `execute()` time. Delegates
-        directly (composition), not reimplemented.
+        """Shot selection and duration capping are identical to
+        `MultiShotAcceptanceRunner.prepare()` — delegated directly
+        (composition), not reimplemented. FLUX seed resolution starts
+        from that same delegated call, then this method corrects it
+        for every shot after the anchor (see the live-evidence-driven
+        correction below) — it is deliberately NOT identical for
+        reference-conditioned shots, unlike an earlier version of this
+        docstring claimed.
 
         `visual_seed_policy` defaults to SHARED here (unlike
         `MultiShotAcceptanceRunner.prepare()`'s own DEFAULT), since a
@@ -198,15 +201,53 @@ class ReferenceContinuityAcceptanceRunner:
         uncapped/per-prompt-hash seed makes little sense as this
         module's own default, though it remains overridable like
         everything else here.
+
+        Live-evidence-driven correction: `plan.resolved_flux_seeds` as
+        returned by `_multi_shot_runner.prepare()` plans every shot's
+        FLUX seed from `shot.image_prompt` — correct for shot 0 (the
+        T2I anchor, which genuinely does submit that exact prompt),
+        but wrong for every other shot, since `execute()` below
+        actually submits `compose_reference_edit_prompt(shot)` for
+        those — a different string, hashing to a different seed under
+        SHARED/DERIVED policy. Confirmed directly against real GPU
+        history: `derive_shot_seed(base_seed, image_prompt)` for the
+        sample fight's shots 1/2 does not match either shot's actual,
+        provider-reported seed; `derive_shot_seed(base_seed,
+        compose_reference_edit_prompt(shot))` matches exactly. This
+        method now re-plans every shot after index 0 using the same
+        prompt `execute()` will actually submit for it — the returned
+        plan's `resolved_flux_seeds` therefore now agrees with reality
+        for the anchor AND every reference-conditioned shot, closing
+        the gap `execute()`'s own seed-evidence check exists to catch.
+        An earlier version of this method's own docstring claimed seed
+        resolution "is exactly the same regardless of whether shots
+        1/2 end up independently generated or reference-conditioned"
+        — that claim was wrong; corrected here alongside the code.
         """
-        from products.chess2fight.rendering.visual_continuity import VisualSeedPolicy
+        from products.chess2fight.rendering.visual_continuity import VisualSeedPolicy, build_seed_override
 
         resolved_policy = visual_seed_policy if visual_seed_policy is not None else VisualSeedPolicy.SHARED
-        return await self._multi_shot_runner.prepare(
+        plan = await self._multi_shot_runner.prepare(
             pgn, preferences, start_shot_index=start_shot_index, shot_count=shot_count, fps=fps,
             max_animation_seconds=max_animation_seconds, visual_seed_policy=resolved_policy,
             allow_exceeding_default_cap=allow_exceeding_default_cap,
         )
+
+        flux_seed_override = (
+            build_seed_override(VisualSeedPolicy(plan.visual_seed_policy), plan.fight_base_visual_seed)
+            if plan.fight_base_visual_seed is not None else None
+        )
+        corrected_flux_seeds = list(plan.resolved_flux_seeds)
+        for i, shot in enumerate(plan.shots):
+            if i == 0:
+                continue  # the anchor: T2I, shot.image_prompt is genuinely what gets submitted
+            reference_prompt = compose_reference_edit_prompt(shot)
+            corrected_flux_seeds[i] = (
+                flux_seed_override(reference_prompt) if flux_seed_override is not None
+                else _derive_flux_seed(reference_prompt)
+            )
+
+        return plan.model_copy(update={"resolved_flux_seeds": corrected_flux_seeds})
 
     async def execute(
         self,
@@ -237,7 +278,18 @@ class ReferenceContinuityAcceptanceRunner:
                 reference-conditioned call; never falls back to
                 independent T2I on this failure.
             SeedEvidenceMismatchError: If any shot's actual FLUX seed
-                disagrees with what `prepare()` planned.
+                disagrees with what `prepare()` planned — raised
+                immediately after that specific shot's own generation
+                completes, before any further paid FLUX or Wan job is
+                submitted (a live-evidence-driven hardening: ComfyUI
+                history from a real failed run showed all 3 FLUX jobs
+                had already executed — including a second reference
+                shot submitted AFTER the first one's seed had already
+                mismatched — before this error was ever raised, because
+                the check previously ran once, as a batch, only after
+                every image generation had already completed). The
+                batch check at the end is retained too, as defense in
+                depth, but is no longer what does the real work.
             FinalVideoMeasurementError: If the final concatenated MP4
                 can't be measured with ffprobe.
         """
@@ -248,6 +300,21 @@ class ReferenceContinuityAcceptanceRunner:
         resolved_animation_height = height if height is not None else settings.comfyui_animation_default_height
         resolved_image_width = settings.comfyui_image_default_width
         resolved_image_height = settings.comfyui_image_default_height
+
+        def _check_seed_immediately(index: int, actual_seed: int, mode: str) -> None:
+            """Sprint 4 hotfix: called right after each individual
+            paid FLUX generation — anchor or reference-conditioned —
+            with that shot's own actual, provider-reported seed. Never
+            batches multiple shots' checks together; raises before the
+            calling loop can proceed to the next shot's own paid call."""
+            planned_seed = plan.resolved_flux_seeds[index]
+            if planned_seed != actual_seed:
+                raise SeedEvidenceMismatchError(
+                    f"Shot at timeline index {plan.selected_shot_indices[index]} "
+                    f"(shot_id={plan.shots[index].shot_id!r}, mode={mode!r}): planned FLUX seed "
+                    f"{planned_seed} does not match the actual provider-reported seed {actual_seed} — "
+                    "stopping immediately, before any further paid FLUX or Wan job."
+                )
 
         # --- Shot 0: normal T2I, via the real, unchanged RenderPipeline ---
         anchor_shot = plan.shots[0]
@@ -272,9 +339,19 @@ class ReferenceContinuityAcceptanceRunner:
         )
 
         # Fail loudly before any reference-conditioned (paid) call —
-        # never fall back to T2I silently on this failure.
+        # never fall back to T2I silently on this failure. Runs before
+        # the seed check below: an anchor with the wrong dimensions is
+        # a more fundamental problem (nothing downstream would be
+        # trustworthy regardless of whether its own seed happened to
+        # match), and this ordering preserves this class's own
+        # pre-existing, already-tested ReferenceAnchorInvalidError
+        # behavior for that case.
         self._validate_anchor(anchor, resolved_image_width, resolved_image_height)
         logger.info("Reference continuity: anchor established from shot %d at %s.", anchor.source_shot_index, anchor.image_path)
+
+        # Immediate check #1 (anchor) — before any reference-conditioned
+        # (paid) call is even attempted.
+        _check_seed_immediately(0, anchor.generation_seed, "t2i")
 
         # --- Shots 1/2: reference-conditioned, BOTH against the SAME anchor —
         # never chained shot0 -> shot1 -> shot2. anchor.image_path is fixed
@@ -283,7 +360,7 @@ class ReferenceContinuityAcceptanceRunner:
         generation_modes = ["t2i"]
         reference_anchor_paths: list[str | None] = [None]
 
-        for shot in plan.shots[1:]:
+        for index, shot in enumerate(plan.shots[1:], start=1):
             reference_prompt = compose_reference_edit_prompt(shot)
             try:
                 result = await reference_provider.generate_reference_conditioned_image(
@@ -291,6 +368,13 @@ class ReferenceContinuityAcceptanceRunner:
                 )
             except ImageProviderError:
                 raise  # no silent fallback to independent T2I — see this class's own docstring
+
+            actual_seed = result.metadata.get("seed", anchor.generation_seed)
+            # Immediate check #2/#3 (each reference-conditioned shot) —
+            # BEFORE this shot's own frame is even saved, and therefore
+            # before the loop can reach the NEXT shot's own paid call.
+            _check_seed_immediately(index, actual_seed, "reference_conditioned")
+
             saved_path = self._asset_manager.save_frame(plan.fight_id, shot.sequence_order, result.image_path)
             frame_metadata = FrameMetadata(
                 frame_number=shot.sequence_order,
@@ -301,7 +385,7 @@ class ReferenceContinuityAcceptanceRunner:
                 shot_type=shot.shot_type.value,
                 source_moves=list(shot.source_moves),
                 timestamp=anchor_frame.metadata.timestamp,
-                generation_seed=result.metadata.get("seed", anchor.generation_seed),
+                generation_seed=actual_seed,
             )
             rendered_frames.append(RenderedFrame(frame_number=shot.sequence_order, frame_path=str(saved_path), metadata=frame_metadata))
             generation_modes.append("reference_conditioned")
@@ -326,7 +410,13 @@ class ReferenceContinuityAcceptanceRunner:
             output_dir=anchor_render_output.output_dir, manifest_path=anchor_render_output.manifest_path,
         )
 
-        # --- Seed evidence: extend the same Prompt 12.1 check to the anchor too ---
+        # --- Seed evidence, batch form: defense in depth only. Every shot
+        # already passed its own immediate check above before its frame
+        # was ever appended to rendered_frames — this can only ever
+        # re-confirm what's already true, never catch something the
+        # per-shot checks missed, since it draws from the exact same
+        # plan.resolved_flux_seeds and the exact same actual seeds those
+        # checks already validated one at a time. ---
         actual_flux_seeds = [frame.metadata.generation_seed for frame in rendered_frames]
         for i, (planned, actual) in enumerate(zip(plan.resolved_flux_seeds, actual_flux_seeds, strict=True)):
             if planned != actual:
