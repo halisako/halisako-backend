@@ -156,11 +156,11 @@
                 0
             ],
             "positive": [
-                "ref:3",
+                "method:1",
                 0
             ],
             "negative": [
-                "ref:4",
+                "method:2",
                 0
             ]
         },
@@ -269,6 +269,32 @@
         "class_type": "ReferenceLatent",
         "_meta": {
             "title": "Reference Latent (Negative Branch)"
+        }
+    },
+    "method:1": {
+        "inputs": {
+            "conditioning": [
+                "ref:3",
+                0
+            ],
+            "reference_latents_method": "offset"
+        },
+        "class_type": "FluxKontextMultiReferenceLatentMethod",
+        "_meta": {
+            "title": "Reference Latent Method (Positive Branch) \u2014 offset"
+        }
+    },
+    "method:2": {
+        "inputs": {
+            "conditioning": [
+                "ref:4",
+                0
+            ],
+            "reference_latents_method": "offset"
+        },
+        "class_type": "FluxKontextMultiReferenceLatentMethod",
+        "_meta": {
+            "title": "Reference Latent Method (Negative Branch) \u2014 offset"
         }
     }
 }

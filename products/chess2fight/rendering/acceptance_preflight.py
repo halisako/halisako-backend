@@ -46,8 +46,22 @@ def validate_reference_workflow_topology(workflow_path: str) -> list[str]:
           text conditioning;
         - a "negative" ReferenceLatent exists, fed by
           ConditioningZeroOut's output;
-        - CFGGuider.positive points at the positive ReferenceLatent;
-        - CFGGuider.negative points at the negative ReferenceLatent.
+        - CFGGuider.positive traces back to the positive ReferenceLatent;
+        - CFGGuider.negative traces back to the negative ReferenceLatent.
+
+    Sprint 4 Prompt 18: CFGGuider.positive/.negative now trace through
+    an intermediate `FluxKontextMultiReferenceLatentMethod` node
+    (Sprint 4 Prompt 16's own conditioning-method node, promoted into
+    the production reference workflow this prompt) rather than
+    requiring a direct link to ReferenceLatent — every reference
+    workflow file in this codebase (production and all three Prompt 16
+    calibration variants) now has this one-hop-further topology.
+    Tracing through the method node (when present) rather than only
+    accepting a direct ReferenceLatent link keeps this function correct
+    for the current, real files, while still correctly failing a
+    hypothetical file where the chain is broken some other way (e.g. a
+    method node present but not actually fed by a ReferenceLatent, or
+    a positive/negative input pointing at neither kind of node at all).
 
     Returns a list of problem messages — empty means the topology
     looks correct. Never raises on a missing/malformed file; a
@@ -79,6 +93,11 @@ def validate_reference_workflow_topology(workflow_path: str) -> list[str]:
             "Flux.2 Klein distilled image-edit topology."
         )
 
+    method_nodes = {
+        node_id: node for node_id, node in workflow.items()
+        if node.get("class_type") == "FluxKontextMultiReferenceLatentMethod"
+    }
+
     guider_nodes = [node for node in workflow.values() if node.get("class_type") == "CFGGuider"]
     if not guider_nodes:
         problems.append("Reference workflow has no CFGGuider node.")
@@ -88,18 +107,32 @@ def validate_reference_workflow_topology(workflow_path: str) -> list[str]:
     positive_ref = guider.get("positive")
     negative_ref = guider.get("negative")
 
-    def _points_at_a_reference_latent(link) -> bool:
-        return isinstance(link, list) and len(link) == 2 and link[0] in reference_latent_nodes
+    def _traces_back_to_a_reference_latent(link) -> bool:
+        """True if `link` points directly at a ReferenceLatent node, or
+        at a FluxKontextMultiReferenceLatentMethod node that is itself
+        fed by one — the two topologies every current reference
+        workflow file in this codebase actually uses."""
+        if not (isinstance(link, list) and len(link) == 2):
+            return False
+        source_node_id = link[0]
+        if source_node_id in reference_latent_nodes:
+            return True
+        if source_node_id in method_nodes:
+            upstream = method_nodes[source_node_id]["inputs"].get("conditioning")
+            return isinstance(upstream, list) and len(upstream) == 2 and upstream[0] in reference_latent_nodes
+        return False
 
-    if not _points_at_a_reference_latent(positive_ref):
+    if not _traces_back_to_a_reference_latent(positive_ref):
         problems.append(
-            f"CFGGuider.positive ({positive_ref!r}) does not point at a ReferenceLatent node — "
-            "the positive branch would not be reference-conditioned."
+            f"CFGGuider.positive ({positive_ref!r}) does not trace back to a ReferenceLatent node (directly "
+            "or through a FluxKontextMultiReferenceLatentMethod node) — the positive branch would not be "
+            "reference-conditioned."
         )
-    if not _points_at_a_reference_latent(negative_ref):
+    if not _traces_back_to_a_reference_latent(negative_ref):
         problems.append(
-            f"CFGGuider.negative ({negative_ref!r}) does not point at a ReferenceLatent node — "
-            "the negative branch would not be reference-conditioned, contradicting the official topology."
+            f"CFGGuider.negative ({negative_ref!r}) does not trace back to a ReferenceLatent node (directly "
+            "or through a FluxKontextMultiReferenceLatentMethod node) — the negative branch would not be "
+            "reference-conditioned, contradicting the official topology."
         )
 
     # Confirm both ReferenceLatent nodes are fed the same latent (the
@@ -338,40 +371,108 @@ async def preflight_check(settings, check_reference_workflow: bool = False) -> t
                     "missing from an outdated ComfyUI install; update before running this experiment."
                 )
 
+        # Sprint 4 Prompt 18: the production reference workflow now
+        # always routes through FluxKontextMultiReferenceLatentMethod
+        # (promoted from Sprint 4 Prompt 16 calibration), using
+        # "offset" specifically — required in addition to
+        # ReferenceLatent/VAEEncode above, not instead of them. Reuses
+        # check_reference_method_node_availability directly (that
+        # function's own docstring covers why it's a hard failure, not
+        # a warning, on the same strictness policy as the checks
+        # above) rather than duplicating its HTTP logic.
+        problems.extend(await check_reference_method_node_availability(settings, ["offset"]))
+
     return problems, warnings
+
+
+def _extract_combo_options(method_input_spec) -> list[str] | None:
+    """Sprint 4 Prompt 18.1 — extracts a ComfyUI `/object_info` combo
+    input's advertised choices, supporting both known representations:
+
+    1. The real, live ComfyUI representation (confirmed directly on an
+       RTX 4090 RunPod instance, independent of this codebase's own
+       assumptions):
+       `["COMBO", {"advanced": ..., "multiselect": ..., "options": [...]}]`
+       — a type-tag string followed by a config dict whose own
+       `"options"` key holds the actual choice list.
+
+    2. The legacy/test representation this codebase's own tests
+       previously assumed exclusively (retained for compatibility,
+       since some `/object_info` combo inputs elsewhere in this
+       codebase's own existing tests already use this shape):
+       `[[...], {}]` — the choice list directly as the first element.
+
+    Root cause this fixes: the prior parsing logic
+    (`method_input_spec[0]`) only ever handled representation 2. On
+    the real representation 1, `method_input_spec[0]` evaluates to the
+    string `"COMBO"` — not a list — so the prior `isinstance(...,
+    list)` guard silently evaluated False and the entire capability
+    check was skipped, with no problem reported, even when the
+    candidate method genuinely wasn't supported. Confirmed by direct
+    reproduction against the exact live schema before this fix existed.
+
+    Returns:
+        The list of advertised choices, or `None` if `method_input_spec`
+        doesn't match either known shape — callers must treat `None`
+        as "choices could not be reliably determined," not as "no
+        problem," per this task's own explicit "do not silently skip
+        the check when parsing fails" requirement.
+    """
+    if not (isinstance(method_input_spec, list) and len(method_input_spec) >= 1):
+        return None
+    first = method_input_spec[0]
+    if isinstance(first, list):
+        # Representation 2 (legacy/test): the choices are the first element directly.
+        return first
+    if isinstance(first, str) and first == "COMBO" and len(method_input_spec) >= 2:
+        # Representation 1 (real, live ComfyUI): a type tag followed by a config dict.
+        config = method_input_spec[1]
+        if isinstance(config, dict) and isinstance(config.get("options"), list):
+            return config["options"]
+    return None
 
 
 async def check_reference_method_node_availability(settings, candidate_methods: list[str]) -> list[str]:
     """Sprint 4 Prompt 16 — a dedicated, additional preflight check for
     the reference-latent method sweep experiment: confirms
     `FluxKontextMultiReferenceLatentMethod` is available on the live
-    ComfyUI installation, and — when the `/object_info` response
-    exposes the node's combo choices — that every value in
-    `candidate_methods` is actually a supported choice.
+    ComfyUI installation, and that every value in `candidate_methods`
+    is actually one of the node's own advertised choices.
 
-    Kept separate from `preflight_check` (not another
-    `check_*_workflow`-style flag on that function) since this check
-    is specific to this one experiment's own new node, not a general
-    reference-conditioning concern every reference-conditioned caller
-    needs — `preflight_check(settings, check_reference_workflow=True)`
-    remains the right call for the base checks (workflow files,
-    ReferenceLatent, VAEEncode, model visibility), and this function is
-    called in addition, only by this experiment's own CLI.
+    Sprint 4 Prompt 18: `preflight_check(settings, check_reference_workflow=True)`
+    now also calls this function directly, with `["offset"]` — since
+    the production reference workflow always requires that specific
+    capability. This function remains independently callable (not
+    folded entirely into `preflight_check`) because calibration
+    callers (Sprint 4 Prompt 16's own CLI) need to check a caller-
+    supplied candidate list — "offset", "uxo/uno", or
+    "index_timestep_zero" — that `preflight_check` itself has no
+    reason to know about.
+
+    Sprint 4 Prompt 18.1: now uses `_extract_combo_options` (see that
+    function's own docstring for the real-vs-legacy schema distinction
+    this fixes) and, per this task's own explicit requirement, treats
+    an unparseable/missing choices shape as a hard failure rather than
+    silently skipping the capability check — this is a strict,
+    paid-GPU preflight; a check that can't confirm what it claims to
+    confirm must fail, not pass by default.
 
     Same strictness policy as the Prompt 13.1 ReferenceLatent/VAEEncode
     check this mirrors: any failure to confirm here is always a hard
-    problem, never a warning — an unsupported or missing method choice
-    means the paid job cannot possibly succeed as configured.
+    problem, never a warning — an unsupported, missing, or
+    undeterminable method choice means the paid job cannot be trusted
+    to succeed as configured.
 
     Args:
         candidate_methods: The `reference_latents_method` values this
             run intends to submit (e.g. `["offset", "uxo/uno",
             "index_timestep_zero"]`) — checked against the live node's
-            own advertised choices, when available.
+            own advertised choices.
 
     Returns:
-        A list of problem strings — empty means the node (and, where
-        checkable, every candidate value) is confirmed available.
+        A list of problem strings — empty means the node is available
+        and every candidate is confirmed among its own advertised
+        choices.
     """
     problems: list[str] = []
     base_url = settings.comfyui_base_url.rstrip("/")
@@ -396,25 +497,30 @@ async def check_reference_method_node_availability(settings, candidate_methods: 
             "ComfyUI install; update before running this experiment."
         ]
 
-    # When the response exposes the combo's own advertised choices,
-    # verify every candidate is actually one of them. Structure follows
-    # the same /object_info combo-input shape the model-visibility
-    # check above already parses (a [choices_list, {}] pair) — if this
-    # specific response doesn't expose it the same way, this check is
-    # skipped rather than guessed at, same "don't overclaim uncertain
-    # parsing" caution as the rest of this module.
     try:
         method_input_spec = info[node_type]["input"]["required"]["reference_latents_method"]
-        available_choices = method_input_spec[0]
-        if isinstance(available_choices, list):
-            for candidate in candidate_methods:
-                if candidate not in available_choices:
-                    problems.append(
-                        f"Candidate method {candidate!r} is not among this ComfyUI installation's own "
-                        f"advertised choices for {node_type!r} ({available_choices}) — refusing to submit "
-                        "an unsupported candidate."
-                    )
-    except (KeyError, IndexError, TypeError):
-        pass  # combo shape not parseable this way — proceed without this specific sub-check
+    except (KeyError, TypeError):
+        return [
+            f"{node_type!r} node is present, but its /object_info response does not expose a "
+            "'reference_latents_method' input at all — cannot confirm any candidate method is supported. "
+            "Refusing to proceed with an unverifiable capability."
+        ]
+
+    available_choices = _extract_combo_options(method_input_spec)
+    if available_choices is None:
+        return [
+            f"{node_type!r} node's 'reference_latents_method' input was present but its advertised "
+            f"choices could not be reliably parsed ({method_input_spec!r}) — refusing to proceed without "
+            "confirming candidate support. This may indicate a ComfyUI schema change; update this "
+            "codebase's own parsing if so."
+        ]
+
+    for candidate in candidate_methods:
+        if candidate not in available_choices:
+            problems.append(
+                f"Candidate method {candidate!r} is not among this ComfyUI installation's own "
+                f"advertised choices for {node_type!r} ({available_choices}) — refusing to submit "
+                "an unsupported candidate."
+            )
 
     return problems

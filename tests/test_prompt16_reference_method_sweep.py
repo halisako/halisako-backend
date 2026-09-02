@@ -91,20 +91,41 @@ class RoutedTransport(httpx.AsyncBaseTransport):
         return httpx.Response(404)
 
 
-def _patch_transport(transport):
+def _patch_transport(monkeypatch, transport):
+    """Sprint 4 Prompt 18 fix: this previously did a direct, permanent
+    `_comfyui_module.httpx.AsyncClient = _client_factory` assignment
+    with no teardown at all — meaning whichever test in this file ran
+    last left httpx.AsyncClient permanently patched to a lambda
+    routing to that one test's own, long-finished transport, silently
+    breaking any later test file's own httpx mocking for the rest of
+    that pytest session (confirmed directly: reproduced by running
+    this file together with tests/test_prompt18_production_offset.py,
+    where two of that file's tests failed with a real 404 response
+    from THIS file's leftover transport, not their own). Using
+    monkeypatch.setattr here instead means it's automatically reverted
+    at the end of each test that uses it, exactly like every other
+    httpx-patching helper in this codebase already does (see
+    tests/test_prompt13_1_workflow_hardening.py's own _patch_client)."""
+
     def _client_factory(*args, **kwargs):
         kwargs["transport"] = transport
         return _REAL_HTTPX_ASYNC_CLIENT(*args, **kwargs)
 
-    _comfyui_module.httpx.AsyncClient = _client_factory
+    monkeypatch.setattr(_comfyui_module.httpx, "AsyncClient", _client_factory)
 
 
 # --- 1. Production reference workflow byte-for-byte unchanged --------------
 
 
-def test_production_reference_workflow_byte_for_byte_unchanged():
+def test_production_reference_workflow_checksum_matches_current_baseline():
+    """Sprint 4 Prompt 18 deliberately, correctly changed the
+    production reference workflow (promoting reference_latents_method
+    "offset" into it — see that prompt's own diff record). This test's
+    checksum was 738ad1818a72a2ac21c5f7ddf69e23c7ead867515a609b3520e07a6c6fe14a9b
+    (Sprint 4 Prompt 16, before that promotion); updated to the new,
+    current baseline so future unexpected drift is still caught."""
     actual_sha256 = hashlib.sha256(open(PRODUCTION_WORKFLOW, "rb").read()).hexdigest()
-    assert actual_sha256 == "738ad1818a72a2ac21c5f7ddf69e23c7ead867515a609b3520e07a6c6fe14a9b"
+    assert actual_sha256 == "b2ff7c9e1024abc76361c363601c68870148f9924dc3ca7c022c81ecfdb10b3d"
 
 
 # --- 2/3/4/5/6/7. Experimental workflow structure ---------------------------
@@ -128,29 +149,40 @@ def test_positive_and_negative_branches_use_the_same_method(method):
 
 
 @pytest.mark.parametrize("method", CANDIDATE_METHODS)
-def test_experimental_workflow_differs_from_production_only_by_method_nodes_and_rewiring(method):
+def test_experimental_workflow_differs_from_production_only_by_method_value(method):
+    """Sprint 4 Prompt 18 promoted "offset" into production, giving
+    production the exact same method:1/method:2 nodes (and 77:90
+    rewiring) every Prompt 16 experimental variant already had. This
+    test's original premise — "exactly two NEW nodes vs. production" —
+    is no longer true for any of the three variants, since production
+    now has those same node IDs too. Redesigned to check what's
+    actually true now: for "offset" specifically, the experimental
+    file is byte-identical to production (documented explicitly, per
+    this task's own "if the experimental offset workflow becomes
+    byte-equivalent... document that fact" instruction); for the other
+    two, every node is identical except method:1/method:2's own
+    reference_latents_method value.
+    """
     with open(PRODUCTION_WORKFLOW) as f:
         production = json.load(f)
     with open(method_workflow_path(method)) as f:
         experimental = json.load(f)
 
-    # Exactly two new nodes.
-    new_node_ids = set(experimental.keys()) - set(production.keys())
-    assert new_node_ids == {"method:1", "method:2"}
+    if method == "offset":
+        assert experimental == production
+        return
 
-    # Every other node is byte-for-byte identical, EXCEPT 77:90's rewired inputs.
+    # No longer "new" nodes — both files already have method:1/method:2 by
+    # the same IDs; only their reference_latents_method value differs.
+    assert set(experimental.keys()) == set(production.keys())
     for node_id in production:
-        if node_id == "77:90":
+        if node_id in ("method:1", "method:2"):
             continue
         assert experimental[node_id] == production[node_id]
-
-    # 77:90 differs only in positive/negative — everything else on that node unchanged.
-    prod_7790 = production["77:90"]
-    exp_7790 = experimental["77:90"]
-    assert exp_7790["inputs"]["cfg"] == prod_7790["inputs"]["cfg"]
-    assert exp_7790["inputs"]["model"] == prod_7790["inputs"]["model"]
-    assert exp_7790["inputs"]["positive"] != prod_7790["inputs"]["positive"]
-    assert exp_7790["inputs"]["negative"] != prod_7790["inputs"]["negative"]
+    assert experimental["method:1"]["inputs"]["reference_latents_method"] == method
+    assert experimental["method:2"]["inputs"]["reference_latents_method"] == method
+    assert production["method:1"]["inputs"]["reference_latents_method"] == "offset"
+    assert production["method:2"]["inputs"]["reference_latents_method"] == "offset"
 
 
 @pytest.mark.parametrize("method", CANDIDATE_METHODS)
@@ -193,18 +225,18 @@ def test_seed_is_exactly_981216397_for_every_candidate(tmp_path):
     assert all(True for _ in plan.candidates)  # planned_seed is plan-level, shared by all
 
 
-def test_actual_seed_equals_planned_seed_end_to_end(tmp_path):
+def test_actual_seed_equals_planned_seed_end_to_end(tmp_path, monkeypatch):
     transport = RoutedTransport()
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     result = asyncio.run(runner.execute(plan))
     for r in result.candidate_results:
         assert r.actual_seed == r.planned_seed == 981216397
 
 
-def test_same_anchor_path_used_for_every_method(tmp_path):
+def test_same_anchor_path_used_for_every_method(tmp_path, monkeypatch):
     transport = RoutedTransport()
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     asyncio.run(runner.execute(plan))
     # All three jobs uploaded from the identical anchor path — confirmed
@@ -221,9 +253,9 @@ def test_same_anchor_sha256_used_for_every_method(tmp_path):
 # --- 14/15/16/17/18/19. Generation counts and control preservation ---------
 
 
-def test_current_index_control_never_generated(tmp_path):
+def test_current_index_control_never_generated(tmp_path, monkeypatch):
     transport = RoutedTransport()
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     asyncio.run(runner.execute(plan))
     submitted_methods = [wf["method:1"]["inputs"]["reference_latents_method"] for wf in transport.submitted_workflows]
@@ -231,17 +263,17 @@ def test_current_index_control_never_generated(tmp_path):
     assert plan.control.generated_this_run is False
 
 
-def test_exactly_three_provider_generations_occur(tmp_path):
+def test_exactly_three_provider_generations_occur(tmp_path, monkeypatch):
     transport = RoutedTransport()
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     asyncio.run(runner.execute(plan))
     assert transport.job_counter == 3
 
 
-def test_each_provider_uses_the_correct_reference_workflow_path(tmp_path):
+def test_each_provider_uses_the_correct_reference_workflow_path(tmp_path, monkeypatch):
     transport = RoutedTransport()
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     result = asyncio.run(runner.execute(plan))
     expected_slugs = {"offset": "offset", "uxo/uno": "uxo", "index_timestep_zero": "index_timestep_zero"}
@@ -280,9 +312,9 @@ def test_zero_videobuilder_calls():
 # --- 20/21/22. Failure semantics --------------------------------------------
 
 
-def test_no_retry_no_fallback_on_failure(tmp_path):
+def test_no_retry_no_fallback_on_failure(tmp_path, monkeypatch):
     transport = RoutedTransport(fail_on_workflow_containing="offset")
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     with pytest.raises(ImageProviderError):
         asyncio.run(runner.execute(plan))
@@ -290,9 +322,9 @@ def test_no_retry_no_fallback_on_failure(tmp_path):
     assert transport.job_counter == 0  # offset failed immediately, never counted as a success
 
 
-def test_first_failure_stops_later_methods(tmp_path):
+def test_first_failure_stops_later_methods(tmp_path, monkeypatch):
     transport = RoutedTransport(fail_on_workflow_containing="offset")
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     with pytest.raises(ImageProviderError):
         asyncio.run(runner.execute(plan))
@@ -301,9 +333,9 @@ def test_first_failure_stops_later_methods(tmp_path):
     assert "index_timestep_zero" not in submitted_methods
 
 
-def test_partial_results_preserved_on_later_failure(tmp_path):
+def test_partial_results_preserved_on_later_failure(tmp_path, monkeypatch):
     transport = RoutedTransport(fail_on_workflow_containing="uxo/uno")
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     with pytest.raises(ImageProviderError):
         asyncio.run(runner.execute(plan))
@@ -363,9 +395,9 @@ def test_existing_comfyui_image_provider_public_api_unchanged():
 # --- 27. Mocked payload proves the method node carries the intended value ---
 
 
-def test_mocked_payload_proves_method_node_carries_intended_value(tmp_path):
+def test_mocked_payload_proves_method_node_carries_intended_value(tmp_path, monkeypatch):
     transport = RoutedTransport()
-    _patch_transport(transport)
+    _patch_transport(monkeypatch, transport)
     runner, plan = asyncio.run(_plan(tmp_path))
     asyncio.run(runner.execute(plan))
     submitted_methods = [wf["method:1"]["inputs"]["reference_latents_method"] for wf in transport.submitted_workflows]

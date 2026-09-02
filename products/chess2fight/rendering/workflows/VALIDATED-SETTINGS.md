@@ -613,3 +613,55 @@ prompt's own test suite). Not yet run on real hardware — the next paid
 run is exactly 3 ComfyUI jobs (one per candidate), reusing the same
 anchor, prompt, and seed (981216397) as the already-paid Prompt 15.1
 shot-2 result, which is never regenerated.
+
+## Production reference method decision record (Sprint 4 Prompt 18)
+
+**Decision: `reference_latents_method = "offset"` is now Halisako's
+explicit production reference-conditioning method.** Not an implicit
+ComfyUI default — set explicitly on both conditioning branches in
+`flux2_klein_reference_4b.json`, which is no longer byte-identical to
+its Sprint 4 Prompt 16 form (checksum
+`738ad1818a72a2ac21c5f7ddf69e23c7ead867515a609b3520e07a6c6fe14a9b`
+before this promotion; `b2ff7c9e1024abc76361c363601c68870148f9924dc3ca7c022c81ecfdb10b3d`
+after).
+
+**Why "index" (the prior implicit default) was rejected**: real GPU
+evidence (Prompt 16, timeline shot 2) showed strong character identity
+but a duplicated diagonal polearm alongside the correct dragon-headed
+halberd — an equipment-topology failure — plus (per Prompt 14/15.1's
+own earlier evidence) excessive anchor/composition lock under a shared
+seed.
+
+**Why "offset" was selected**: real GPU evidence across both known
+reference-conditioned shots. **Correction (Sprint 4 Prompt 18.1)**:
+the shot-2 SSIM values originally recorded here had been mixed up with
+shot 1's own — independently recomputed from the saved live evidence:
+- Shot 2 (Prompt 16): duplicate polearm removed, coherent single
+  weapon, identity/arena/style retained, useful shot variation
+  retained (RGB SSIM anchor→index 0.799134, anchor→offset 0.750260,
+  index→offset 0.677935 — meaningful variation from index, not simply
+  reverting to anchor lock).
+- Shot 1 (Prompt 17): fighter identities, wardrobe/armor, and the
+  dragon weapon's singular coherent form all preserved; twin-weapon
+  configuration retained; more variation from anchor than index (RGB
+  SSIM anchor→index 0.950738, anchor→offset 0.761308, index→offset
+  0.774020).
+
+SSIM here is supporting evidence for relative image variation, not a
+proof of visual quality — the qualitative visual review (identity,
+equipment coherence, arena/style) is what actually grounds the
+decision.
+
+The other two candidates tested in Prompt 16 (`uxo/uno`,
+`index_timestep_zero`) both showed major identity/equipment/
+environment drift or mutation and were not selected.
+
+**This does not prove full video continuity is solved.** No Wan
+animation or video concatenation has been evaluated with this method;
+weapon/equipment coherence across exactly two isolated reference shots
+is what's been validated, not a complete rendered fight.
+
+**Next acceptance gate (documented, not executed by this prompt)**:
+canonical T2I anchor + two derived-seed FLUX offset reference shots +
+Wan I2V for all three shots + VideoBuilder concatenation. See this
+prompt's own deliverable report for the exact contract.

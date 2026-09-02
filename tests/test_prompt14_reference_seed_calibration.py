@@ -358,12 +358,19 @@ def test_existing_prompt13_full_acceptance_unchanged():
 
 
 def test_existing_reference_workflow_unchanged():
+    """Sprint 4 Prompt 18: production now routes through
+    FluxKontextMultiReferenceLatentMethod (offset) — see that
+    prompt's own production promotion. Updated from the direct
+    ref:3/ref:4 links this test originally asserted (Sprint 4
+    Prompt 13.1)."""
     import json
 
     with open("products/chess2fight/rendering/workflows/flux2_klein_reference_4b.json") as f:
         wf = json.load(f)
-    assert wf["77:90"]["inputs"]["positive"] == ["ref:3", 0]
-    assert wf["77:90"]["inputs"]["negative"] == ["ref:4", 0]
+    assert wf["77:90"]["inputs"]["positive"] == ["method:1", 0]
+    assert wf["77:90"]["inputs"]["negative"] == ["method:2", 0]
+    assert wf["method:1"]["inputs"]["conditioning"] == ["ref:3", 0]
+    assert wf["method:2"]["inputs"]["conditioning"] == ["ref:4", 0]
 
 
 def test_existing_image_provider_api_unchanged():

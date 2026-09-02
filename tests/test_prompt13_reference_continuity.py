@@ -456,5 +456,11 @@ def test_new_workflow_file_is_valid_json_with_expected_new_nodes():
     assert workflow["ref:2"]["class_type"] == "VAEEncode"
     assert "ref:3" in workflow
     assert workflow["ref:3"]["class_type"] == "ReferenceLatent"
-    # The redirected wire: CFGGuider's positive now points at ref:3, not 77:92 directly.
-    assert workflow["77:90"]["inputs"]["positive"] == ["ref:3", 0]
+    # Sprint 4 Prompt 18: CFGGuider's positive now points at method:1
+    # (FluxKontextMultiReferenceLatentMethod, promoted to production
+    # with reference_latents_method="offset"), which itself points at
+    # ref:3 — one hop further than the direct ref:3 link this test
+    # originally asserted (Sprint 4 Prompt 13), before that method node
+    # existed at all in the production workflow.
+    assert workflow["77:90"]["inputs"]["positive"] == ["method:1", 0]
+    assert workflow["method:1"]["inputs"]["conditioning"] == ["ref:3", 0]

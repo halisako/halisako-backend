@@ -143,11 +143,23 @@ def test_default_derived_policy_unchanged_without_explicit_seeds(tmp_path):
 # --- 9/10. Mocked non-dry-run CLI wiring + end-to-end metadata agreement ---
 
 
-def _run_cli_with_mocked_comfyui(anchor_path: str, explicit_seeds: str | None, manifest_path: str):
+def _run_cli_with_mocked_comfyui(monkeypatch, anchor_path: str, explicit_seeds: str | None, manifest_path: str):
     """Runs the actual CLI's _main() in-process, with httpx mocked at
     the transport level — exercising the REAL
     ComfyUIImageProvider/seed_override wiring the CLI itself
-    constructs, not a hand-rolled substitute."""
+    constructs, not a hand-rolled substitute.
+
+    Sprint 4 Prompt 18 fix: now takes monkeypatch and uses
+    monkeypatch.setattr rather than a direct, permanent
+    `_comfyui_module.httpx.AsyncClient = _client_factory` assignment —
+    that direct form left httpx.AsyncClient permanently patched after
+    this module's own tests finished, with no teardown at all, which
+    silently broke a later test file's own httpx mocking for the rest
+    of the same pytest session (confirmed directly: reproduced by
+    running this file together with
+    tests/test_prompt18_production_offset.py). The same bug, same fix,
+    as tests/test_prompt16_reference_method_sweep.py's own
+    _patch_transport needed."""
 
     class RoutedTransport(httpx.AsyncBaseTransport):
         def __init__(self):
@@ -180,7 +192,7 @@ def _run_cli_with_mocked_comfyui(anchor_path: str, explicit_seeds: str | None, m
         kwargs["transport"] = transport
         return _REAL_HTTPX_ASYNC_CLIENT(*args, **kwargs)
 
-    _comfyui_module.httpx.AsyncClient = _client_factory
+    monkeypatch.setattr(_comfyui_module.httpx, "AsyncClient", _client_factory)
 
     argv = [
         "render_reference_seed_calibration.py", "--sample", "--anchor-path", anchor_path,
@@ -203,7 +215,7 @@ def test_mocked_cli_wiring_submits_pinned_seeds_not_derived_ones(tmp_path, monke
     _make_anchor(anchor_path)
     manifest_path = str(tmp_path / "manifest.json")
 
-    exit_code, submitted_seeds = _run_cli_with_mocked_comfyui(anchor_path, "2727023522,981216397", manifest_path)
+    exit_code, submitted_seeds = _run_cli_with_mocked_comfyui(monkeypatch, anchor_path, "2727023522,981216397", manifest_path)
 
     assert exit_code == 0
     assert submitted_seeds == [2727023522, 981216397]
@@ -217,7 +229,7 @@ def test_mocked_cli_end_to_end_metadata_seed_agrees_with_planned(tmp_path, monke
     _make_anchor(anchor_path)
     manifest_path = str(tmp_path / "manifest.json")
 
-    exit_code, submitted_seeds = _run_cli_with_mocked_comfyui(anchor_path, "2727023522,981216397", manifest_path)
+    exit_code, submitted_seeds = _run_cli_with_mocked_comfyui(monkeypatch, anchor_path, "2727023522,981216397", manifest_path)
     assert exit_code == 0
 
     manifest = json.loads(open(manifest_path).read())
@@ -236,7 +248,7 @@ def test_mocked_cli_without_explicit_seeds_uses_derived_policy(tmp_path, monkeyp
     _make_anchor(anchor_path)
     manifest_path = str(tmp_path / "manifest.json")
 
-    exit_code, submitted_seeds = _run_cli_with_mocked_comfyui(anchor_path, None, manifest_path)
+    exit_code, submitted_seeds = _run_cli_with_mocked_comfyui(monkeypatch, anchor_path, None, manifest_path)
     assert exit_code == 0
     # No pinning requested — the two submitted seeds are whatever DERIVED
     # policy produces for this run's own (new Prompt 15) prompt text.

@@ -78,13 +78,22 @@ def test_negative_reference_latent_receives_conditioning_zero_out_output():
 
 
 def test_cfgguider_positive_points_to_reference_conditioned_positive():
+    """Sprint 4 Prompt 18: production now routes through
+    FluxKontextMultiReferenceLatentMethod (method:1) — CFGGuider.positive
+    points at that node, which in turn traces back to ref:3
+    (ReferenceLatent), rather than pointing at ref:3 directly as it did
+    before this prompt's production promotion of the "offset" method."""
     wf = _load_reference_workflow()
-    assert wf["77:90"]["inputs"]["positive"] == ["ref:3", 0]
+    assert wf["77:90"]["inputs"]["positive"] == ["method:1", 0]
+    assert wf["method:1"]["inputs"]["conditioning"] == ["ref:3", 0]
 
 
 def test_cfgguider_negative_points_to_reference_conditioned_negative():
+    """Sprint 4 Prompt 18: same reasoning as the positive-branch test
+    above, for the negative branch (method:2, tracing back to ref:4)."""
     wf = _load_reference_workflow()
-    assert wf["77:90"]["inputs"]["negative"] == ["ref:4", 0]
+    assert wf["77:90"]["inputs"]["negative"] == ["method:2", 0]
+    assert wf["method:2"]["inputs"]["conditioning"] == ["ref:4", 0]
 
 
 def test_validate_reference_workflow_topology_passes_for_the_real_file():
@@ -201,6 +210,16 @@ def test_reference_node_preflight_all_available_produces_no_problems(monkeypatch
     handlers = _model_visibility_handlers()
     handlers["GET /object_info/ReferenceLatent"] = lambda r: httpx.Response(200, json={"ReferenceLatent": {"input": {}}})
     handlers["GET /object_info/VAEEncode"] = lambda r: httpx.Response(200, json={"VAEEncode": {"input": {}}})
+    # Sprint 4 Prompt 18: preflight_check now also requires
+    # FluxKontextMultiReferenceLatentMethod (with "offset" support) —
+    # without this handler, that new HTTP call would 404 and this
+    # "all available" happy-path test would no longer be testing a
+    # genuinely all-available scenario.
+    handlers["GET /object_info/FluxKontextMultiReferenceLatentMethod"] = lambda r: httpx.Response(200, json={
+        "FluxKontextMultiReferenceLatentMethod": {
+            "input": {"required": {"reference_latents_method": [["offset", "index", "uxo/uno", "index_timestep_zero"], {}]}}
+        }
+    })
     _patch_client(monkeypatch, _MockTransport(handlers))
 
     problems, warnings = asyncio.run(preflight_module.preflight_check(settings, check_reference_workflow=True))
@@ -262,8 +281,8 @@ def test_canonical_preserve_identity_text_is_focus_independent():
     white_prompt = compose_reference_edit_prompt(white_focused)
     black_prompt = compose_reference_edit_prompt(black_focused)
 
-    white_preserve = white_prompt.split("Change only:")[0]
-    black_preserve = black_prompt.split("Change only:")[0]
+    white_preserve = white_prompt.split("CHANGE ONLY:")[0]
+    black_preserve = black_prompt.split("CHANGE ONLY:")[0]
     assert white_preserve == black_preserve
 
 
@@ -271,7 +290,7 @@ def test_foreground_background_prominence_appears_only_in_change_block():
     prompted = _prompted_timeline(_sample_pgn())
     shot = prompted.shots[1]
     edit_prompt = compose_reference_edit_prompt(shot)
-    preserve_block, change_block = edit_prompt.split("Change only:", 1)
+    preserve_block, change_block = edit_prompt.split("CHANGE ONLY:", 1)
     assert "prominence" not in preserve_block.lower()
     assert "background" not in preserve_block.lower()
     assert "prominence" in change_block.lower()
@@ -281,8 +300,8 @@ def test_shot_action_and_camera_remain_shot_specific():
     prompted = _prompted_timeline(_sample_pgn())
     edit_prompt_1 = compose_reference_edit_prompt(prompted.shots[1])
     edit_prompt_2 = compose_reference_edit_prompt(prompted.shots[2])
-    change_1 = edit_prompt_1.split("Change only:")[1]
-    change_2 = edit_prompt_2.split("Change only:")[1]
+    change_1 = edit_prompt_1.split("CHANGE ONLY:")[1]
+    change_2 = edit_prompt_2.split("CHANGE ONLY:")[1]
     assert change_1 != change_2
 
 

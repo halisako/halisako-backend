@@ -261,12 +261,20 @@ def test_zero_videobuilder_calls():
 
 
 def test_reference_workflow_json_unchanged():
+    """Sprint 4 Prompt 18: production now routes through
+    FluxKontextMultiReferenceLatentMethod (offset) — updated from the
+    direct ref:3/ref:4 links this test originally asserted. The
+    generation parameters below (model, steps, ...) remain exactly
+    this task's own explicit "don't change any other generation
+    parameter" requirement — confirmed still true."""
     import json
 
     with open("products/chess2fight/rendering/workflows/flux2_klein_reference_4b.json") as f:
         wf = json.load(f)
-    assert wf["77:90"]["inputs"]["positive"] == ["ref:3", 0]
-    assert wf["77:90"]["inputs"]["negative"] == ["ref:4", 0]
+    assert wf["77:90"]["inputs"]["positive"] == ["method:1", 0]
+    assert wf["77:90"]["inputs"]["negative"] == ["method:2", 0]
+    assert wf["method:1"]["inputs"]["conditioning"] == ["ref:3", 0]
+    assert wf["method:2"]["inputs"]["conditioning"] == ["ref:4", 0]
     assert wf["77:87"]["inputs"]["unet_name"] == "flux-2-klein-4b.safetensors"
     assert wf["77:93"]["inputs"]["steps"] == 4
     assert wf["77:90"]["inputs"]["cfg"] == 1
